@@ -37,7 +37,10 @@ The same reasoning covers `odb::hasOneSiteMaster` and `odb::makeSiteLoc`.
 ## Correctness — measured, not claimed
 
 Checked against the upstream `tap` regression goldens at pin
-`b5624809f29048e1f9ce9e83eb562620c652e084`, where all 38 cases reproduce.
+`945a9f48dc6e5cc91d865daa92c45a1094cb682c` (`vyges-openroad 2026.08.0`), re-measured 2026-08-23.
+
+⚠️ **A correlation result is a statement about one upstream commit.** This one was exact at the
+previous pin and is not at this one — see the table.
 
 Unlike a floorplan, this engine prints almost nothing — four message codes in the whole upstream
 module — so its goldens are **DEF, not logs**. Conformance therefore diffs the DEF `ROW` section
@@ -65,11 +68,25 @@ the row it lands in.
 | | |
 | --- | --- |
 | `cut_rows` | **10 of 10** comparable cases exact |
-| endcaps + tapcells | **9 of 9** exact |
-| combined `tapcell` | **16 of 16** exact |
+| endcaps | **9 of 9** exact |
+| combined `tapcell` | ⚠️ **14 of 20** — was 16 of 16 at pin `b5624809` |
 
 Every physical cell is compared — name, master, position, orientation — plus the DEF `ROW` lines.
 The largest case places 22,844 cells.
+
+**Why combined `tapcell` regressed.** Between the two pins upstream changed endcap and tapcell
+placement across five commits — `src/tap` moved by 32 files, +8,323/−243 — and this engine has not
+tracked those changes. Six cases differ; **four of them are new upstream cases**, and all six have
+changed goldens, so this is upstream behaviour not yet implemented rather than a defect introduced
+here. Both the instance naming and the orientation moved:
+
+```text
+ours      PHY_EDGE_ROW_0_Left        TAPCELL_X1  0 0  N
+upstream  PHY_EDGE_CORE_ROW_0_1_Left TAPCELL_X1  0 0  FS
+```
+
+⟹ Treat combined `tapcell` output as **not correlated at this pin**. `cut_rows` and endcap
+placement are unaffected and remain exact.
 
 Instance *names* match except for the trailing counter: upstream numbers physical cells in the
 order Boost hands back polygon vertices, an arbitrary starting vertex rather than a stated rule.

@@ -146,6 +146,42 @@ pub fn classify_corners(outline: &[Point]) -> Vec<Corner> {
         .collect()
 }
 
+/// **T16** — put a hole's boundary back into the order upstream walks it.
+///
+/// 🔑 **Classification and traversal need OPPOSITE windings, and only classification gets one for
+/// free.** `loom::poly90` hands holes wound clockwise, which is what [`classify_edges`] wants —
+/// see its Winding note. Upstream receives them counter-clockwise, so it *walks* a hole the other
+/// way round from us, and the walk order is not cosmetic: where two cells contend for one
+/// position, whoever is placed first keeps it and the loser is skipped outright.
+///
+/// So reverse the sequence and each segment's endpoints, and carry every KIND through unchanged —
+/// a segment's classification is a property of the boundary, not of the direction walked round it.
+///
+/// Measured on `abutting_macros_step_no_corners` at pin `945a9f4`: with the hole walked our way,
+/// the `Right` edge at `(11020, 140000)` reached row `ROW_49_1` before the `Top` edge did and took
+/// the position; upstream walks `Top` first and logs *"Skipping ROW_49_1 due to placed cells in
+/// Right"*. Two cells, two rows, one reversed walk.
+fn reversed_ring(edges: Vec<Edge>, corners: Vec<Corner>) -> (Vec<Edge>, Vec<Corner>) {
+    let edges = edges
+        .into_iter()
+        .rev()
+        .map(|e| Edge {
+            kind: e.kind,
+            p0: e.p1,
+            p1: e.p0,
+        })
+        .collect();
+    // ⚠️ A corner belongs to the vertex an edge STARTS at, so plain `.rev()` would slide the
+    // corner sequence one place against the reversed edge sequence. Reversing puts the ring's
+    // last vertex first; rotating by one puts vertex 0 back at the front, which is where the
+    // reversed walk begins.
+    let mut corners: Vec<Corner> = corners.into_iter().rev().collect();
+    if !corners.is_empty() {
+        corners.rotate_right(1);
+    }
+    (edges, corners)
+}
+
 /// Both boundary answers for a region, kept per polygon so a caller can tell which hole belongs
 /// to which piece — endcap placement needs that structure, not a flat list.
 pub fn classify(region: &Poly90Set) -> Vec<ClassifiedPolygon> {
@@ -157,7 +193,7 @@ pub fn classify(region: &Poly90Set) -> Vec<ClassifiedPolygon> {
             outer_corners: classify_corners(&outer),
             holes: holes
                 .into_iter()
-                .map(|h| (classify_edges(&h), classify_corners(&h)))
+                .map(|h| reversed_ring(classify_edges(&h), classify_corners(&h)))
                 .collect(),
         })
         .collect()
@@ -280,6 +316,41 @@ mod tests {
         // x>4, y>4, so this is the inner bottom-left — the same local shape as the lower-left
         // corner of a hole.
         assert_eq!(inner[0].kind, CornerType::InnerBottomLeft);
+    }
+
+    #[test]
+    fn a_hole_is_handed_back_walked_the_way_upstream_walks_it() {
+        // 🔑 The upstream rule, from `Tapcell::getBoundaryAreas`: a hole reaches it from
+        // `polygon_90_set_data::get_polygons`, which winds it the SAME way as an outer boundary.
+        // Measured across the suite at pin `945a9f4`, every ring the reference walks — 21 outer
+        // and 4 hole rings — is counter-clockwise. `loom::poly90` winds holes clockwise, so the
+        // sequence has to be turned round to place cells in the reference's order.
+        //
+        // ⚠️ Order is not cosmetic. `placeEndcapEdge` skips a cell whose row span is already
+        // taken, so whichever of two contending cells is walked to first keeps the position.
+        let hole_cw = vec![pt(10, 10), pt(10, 20), pt(20, 20), pt(20, 10)];
+        let (edges, corners) = reversed_ring(classify_edges(&hole_cw), classify_corners(&hole_cw));
+
+        let walked: Vec<Point> = edges.iter().map(|e| e.p0).collect();
+        assert_eq!(
+            walked,
+            vec![pt(10, 10), pt(20, 10), pt(20, 20), pt(10, 20)],
+            "counter-clockwise, and still starting at the ring's first vertex"
+        );
+        for e in &edges {
+            assert!(
+                classify_edges(&hole_cw)
+                    .iter()
+                    .any(|o| o.p0 == e.p1 && o.p1 == e.p0 && o.kind == e.kind),
+                "reversing a walk must not reclassify {:?} -- the flip is in the winding, and \
+                 applying it a second time would undo it",
+                e.p0
+            );
+        }
+        // A corner belongs to the vertex its edge starts at; the two sequences have to stay in
+        // step, or a contested corner is resolved against the wrong neighbour.
+        let corner_pts: Vec<Point> = corners.iter().map(|c| c.p).collect();
+        assert_eq!(corner_pts, walked, "corners walk in step with the edges");
     }
 
     #[test]

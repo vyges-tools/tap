@@ -729,14 +729,27 @@ pub fn rows_on_edge<'a>(edge: &Edge, rows: &'a [Row], site: &str) -> Vec<&'a Row
 /// Measured on that case, ours began at `(0, 282800)` and upstream at `(0, 0)` — the same four
 /// edges rotated by one, so our `Left` claimed the origin where upstream's `Bottom` should.
 ///
-/// ℹ️ Upstream's order is whatever Boost hands it, which is not a stated rule; the lowest-then-
-/// leftmost vertex reproduces it for an outer boundary, which is where the contested die corners
-/// are.
+/// ℹ️ Upstream's order is whatever Boost hands it, which is not a stated rule. **Leftmost, then
+/// lowest** reproduces it for 45 of the 48 rings measured across the whole suite at pin `945a9f4`
+/// — every outer boundary bar two, and every hole bar one.
+///
+/// ⛔ **MEASURED WRONG for three rings, and left that way deliberately.** `cut_rows_min_step_top_left`
+/// and `endcap_corners` start at a re-entrant vertex of their outline, and
+/// `single_row_macros_offset`'s hole starts at `(49400, 140000)` when this rule picks
+/// `(11400, 28000)`. All three are polygons whose boundary touches itself, so Boost's scanline
+/// closes them somewhere other than their leftmost vertex; deriving *where* means reproducing
+/// `polygon_90_set_data::get_polygons`, which has not been done. The predecessor rule
+/// (lowest-then-leftmost) was wrong on those same three AND on three more, so this is strictly
+/// better rather than complete — do not fit a fourth rule to the remainder.
 fn rotate_to_lowest_left(edges: &[Edge]) -> Vec<Edge> {
-    let Some(start) = (0..edges.len()).min_by_key(|&i| (edges[i].p0.y, edges[i].p0.x)) else {
+    let Some(start) = (0..edges.len()).min_by_key(|&i| (edges[i].p0.x, edges[i].p0.y)) else {
         return edges.to_vec();
     };
-    edges[start..].iter().chain(&edges[..start]).cloned().collect()
+    edges[start..]
+        .iter()
+        .chain(&edges[..start])
+        .cloned()
+        .collect()
 }
 
 /// **T14** — everything in a row that an EDGE has to avoid: the corners and the earlier edges.
@@ -809,7 +822,12 @@ fn is_at_row_end(cell: Rect, row: Rect) -> bool {
 /// it does not carry on hoping a later overlap is displaceable.
 ///
 /// Returns the indices to displace, or `None` to skip this corner.
-fn resolve_corner(cell: Rect, row_bbox: Rect, ring: usize, placed: &[PlacedCorner]) -> Option<Vec<usize>> {
+fn resolve_corner(
+    cell: Rect,
+    row_bbox: Rect,
+    ring: usize,
+    placed: &[PlacedCorner],
+) -> Option<Vec<usize>> {
     let cell_at_end = is_at_row_end(cell, row_bbox);
     let mut displaced = Vec::new();
     for other in placed {
@@ -880,8 +898,7 @@ pub fn place_all(
                         };
                         let cell = Rect::new(p.x, p.y, p.x + m.width, p.y + m.height);
                         let existing = placed_corners.entry(row.name.clone()).or_default();
-                        let Some(displaced) =
-                            resolve_corner(cell, row.bbox, ring_id, existing)
+                        let Some(displaced) = resolve_corner(cell, row.bbox, ring_id, existing)
                         else {
                             continue; // an overlap this corner does not out-rank
                         };

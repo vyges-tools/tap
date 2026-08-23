@@ -52,8 +52,30 @@ EXIT STATUS:
   2  error       usage error, unreadable database, no DBU scale, or a failed write
 ";
 
+
+/// The pin, inherited from the crate every engine already depends on.
+const CRATE_PIN: &str = vyges_opendb::OPENROAD_PIN;
+
+/// The pin this binary was built against, injected into the descriptor at print time.
+///
+/// 🔑 **One definition for the whole programme, inherited rather than typed.** The SHA lives in
+/// `openroad-pin.yaml` in `vyges-opendb-lib` and reaches here through `vyges-opendb`, which this
+/// engine already depends on. Before this, every engine spelled the pin out in its own
+/// `--describe` prose, and four of them were still quoting the previous one a day after it moved.
+///
+/// ⚠️ **It reports what this BINARY was built against — not that the binary is current.** A stale
+/// build reports its stale pin quite happily. That is the point: a harness compares this against
+/// the oracle image it is about to launch and refuses on a mismatch, which is the check that was
+/// missing when two engines ran a whole gate against the previous pin's oracle.
+const PIN_TOKEN: &str = "@OPENROAD_PIN@";
+
+fn describe() -> String {
+    DESCRIBE.replace(PIN_TOKEN, CRATE_PIN)
+}
+
 const DESCRIBE: &str = r#"{
   "schema": "vyges-tool-descriptor/1.1",
+  "openroad_pin": "@OPENROAD_PIN@",
   "name": "tap",
   "summary": "row cutting around macros, and physical-cell insertion (well taps, endcaps)",
   "maturity": "structured",
@@ -62,15 +84,15 @@ const DESCRIBE: &str = r#"{
       "The boundary classification (row region, edge and corner types) is implemented and inspectable with the `boundary` verb, but NOTHING IS PLACED from it yet. ONLY `cut-rows` mutates the design.",
       "Unnamed endcap positions are filled from the library's own LEF58 master types (odb reports these as space-separated strings like \"ENDCAP LEFTBOTTOMCORNER\", not the enum spelling). Two masters claiming one position is an ERROR naming both, not a coin flip: a wrong endcap is a well-tie fault nobody sees until silicon. A position nothing fills stays empty and places nothing.",
       "Taps and endcaps use DIFFERENT default name prefixes -- TAP_ and PHY_ -- because they are separate namespaces that can be ripped up independently.",
-      "MEASURED 2026-08-23 against the upstream goldens at pin 945a9f48dc6e5cc91d865daa92c45a1094cb682c: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), and endcap placement 9 of 9 exact -- every physical cell matching the golden in master, position and orientation.",
+      "MEASURED 2026-08-23 against the upstream goldens at pin @OPENROAD_PIN@: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), and endcap placement 9 of 9 exact -- every physical cell matching the golden in master, position and orientation.",
       "status is one of applied, planned, vacuous or error. VACUOUS IS NOT APPLIED: it means the run changed nothing -- no row cut, no cell inserted, none removed -- and the declared assertion passes only on applied, so a no-op fails it rather than reporting a transformation that did not happen. Zero may still be the right answer for the design; read the count and decide. A dry run reports planned, which never claimed to have applied anything.",
       "All five commands are implemented: cut-rows, place-endcaps, place-tapcells, the combined tapcell, and ripup. Rip-up matches by NAME PREFIX, which is the only mark these cells carry -- they are physical-only instances with no nets. An EMPTY prefix removes nothing rather than everything, which is the difference between undoing a tap step and destroying the design.",
-      "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin b5624809f29048e1f9ce9e83eb562620c652e084 and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
+      "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin @OPENROAD_PIN@ and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
       "Row cutting itself is odb's own cutRows from odb/util.h, not a reimplementation: it is odb's algorithm on odb's rows, and OpenDB is the substrate. What this engine decides is the policy around it -- which instances are blockages, the halo, and the minimum row width.",
       "Blockages are placed macros (dbInst::isBlock). A macro that is NOT placed is skipped and reported by name (upstream TAP-32), never silently ignored, because rows would otherwise be left crossing wherever it lands.",
       "The minimum row width is the LARGER of two endcap widths and any --row-min-width given, so a caller's floor cannot quietly produce rows too narrow to cap.",
       "Halos and widths are given in MICRONS and converted with the database's dbu_per_micron. A database with no DBU scale is an error rather than an assumed scale.",
-      "Written against the upstream tap regression goldens at pin 945a9f48dc6e5cc91d865daa92c45a1094cb682c (vyges-openroad 2026.08.0). Conformance for the implemented subset is measured by diffing the DEF ROWS section against each case's .defok: 10 of 10 comparable cases exact. ⚠️ A correlation result is a statement about ONE upstream commit -- this one was re-measured when the pin moved, and combined tapcell regressed from exact.",
+      "Written against the upstream tap regression goldens at pin @OPENROAD_PIN@ (vyges-openroad 2026.08.0). Conformance for the implemented subset is measured by diffing the DEF ROWS section against each case's .defok: 10 of 10 comparable cases exact. ⚠️ A correlation result is a statement about ONE upstream commit -- this one was re-measured when the pin moved, and combined tapcell regressed from exact.",
       "The corner classification is no longer checked by a separate harness. That check compared this engine's corner CENSUS against the corner CELLS a golden holds and reported 4 exact and 6 unresolved; it was retired on 2026-08-23 because those 6 could never resolve -- upstream classifies every corner too and filters only at placement (getRow), so a corner no row reaches leaves no trace in any golden on either side. All 10 of its cases are compared cell by cell by the DEF gates instead, and the corner TYPE is part of the instance name those compare (PHY_CORNER_ROW_0_OuterBottomLeft_0), alongside master, position and orientation.",
       "The default output is IN PLACE, over the input database. Pass --out-odb to write elsewhere, or --dry-run to report without writing."
   ],
@@ -1057,7 +1079,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--describe") {
-        print!("{DESCRIBE}");
+        print!("{}", describe());
         return ExitCode::SUCCESS;
     }
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
@@ -1138,6 +1160,39 @@ mod tests {
         for cmd in ["tapcell", "place-endcaps", "place-tapcells"] {
             assert!(USAGE.contains("cut-rows"));
             assert_ne!(cmd, "cut-rows");
+        }
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::{describe, PIN_TOKEN};
+
+    #[test]
+    fn the_descriptor_reports_the_pin_this_binary_was_built_against() {
+        let d = describe();
+        assert!(
+            !d.contains(PIN_TOKEN),
+            "the pin placeholder survived into the output -- the substitution did not run"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&d).expect("the descriptor is still valid JSON once filled in");
+        assert_eq!(
+            v["openroad_pin"], super::CRATE_PIN,
+            "the descriptor must report the pin this binary was actually built against"
+        );
+        assert_eq!(super::CRATE_PIN.len(), 40, "a full commit SHA, not an abbreviation");
+    }
+
+    /// ⛔ The whole point of inheriting the pin is that no engine carries one of its own.
+    #[test]
+    fn no_sha_is_hardcoded_anywhere_in_the_descriptor() {
+        let raw = super::DESCRIBE;
+        for tok in raw.split(|c: char| !c.is_ascii_hexdigit()) {
+            assert!(
+                tok.len() < 40,
+                "{tok} looks like a hardcoded commit -- use the {PIN_TOKEN} placeholder"
+            );
         }
     }
 }

@@ -213,7 +213,7 @@ fn cut_rows(args: &[String]) -> ExitCode {
     let rows_before = db.num_rows().unwrap_or(0);
     let mut written: Option<String> = None;
     if !cli.dry_run {
-        if let Err(e) = db.cut_rows(min_width, &blockages.cut_around, halo_x, halo_y) {
+        if let Err(e) = db.cut_rows(min_width, 0, &blockages.cut_around, halo_x, halo_y) {
             eprintln!("vyges-tap: cannot cut rows: {e}");
             return ExitCode::from(2);
         }
@@ -846,8 +846,11 @@ fn tapcell(args: &[String]) -> ExitCode {
         .collect();
     let blockages = select_blockages(&instances);
     let default = default_distance(dbu as i32);
+    // ⚠️ 0 = odb narrow-region cutting OFF, which is what upstream ifp passes and what keeps
+    // this a signature change rather than a behaviour change. See Db::cut_rows.
     if let Err(e) = db.cut_rows(
         min_row_width(flat.endcap_master.as_ref().map(|m| m.width), row_min),
+        0,
         &blockages.cut_around,
         or_default(halo_x, default),
         or_default(halo_y, default),

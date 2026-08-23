@@ -47,6 +47,7 @@ OPTIONS:
 
 EXIT STATUS:
   0  applied     rows were cut and the database written
+  0  vacuous     the run changed nothing -- NOT a transformation; read the count
   1  refused     the design cannot be processed as asked
   2  error       usage error, unreadable database, no DBU scale, or a failed write
 ";
@@ -62,14 +63,15 @@ const DESCRIBE: &str = r#"{
       "Unnamed endcap positions are filled from the library's own LEF58 master types (odb reports these as space-separated strings like \"ENDCAP LEFTBOTTOMCORNER\", not the enum spelling). Two masters claiming one position is an ERROR naming both, not a coin flip: a wrong endcap is a well-tie fault nobody sees until silicon. A position nothing fills stays empty and places nothing.",
       "Taps and endcaps use DIFFERENT default name prefixes -- TAP_ and PHY_ -- because they are separate namespaces that can be ripped up independently.",
       "MEASURED 2026-08-23 against the upstream goldens at pin 945a9f48dc6e5cc91d865daa92c45a1094cb682c: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), and endcap placement 9 of 9 exact -- every physical cell matching the golden in master, position and orientation.",
+      "status is one of applied, planned, vacuous or error. VACUOUS IS NOT APPLIED: it means the run changed nothing -- no row cut, no cell inserted, none removed -- and the declared assertion passes only on applied, so a no-op fails it rather than reporting a transformation that did not happen. Zero may still be the right answer for the design; read the count and decide. A dry run reports planned, which never claimed to have applied anything.",
       "All five commands are implemented: cut-rows, place-endcaps, place-tapcells, the combined tapcell, and ripup. Rip-up matches by NAME PREFIX, which is the only mark these cells carry -- they are physical-only instances with no nets. An EMPTY prefix removes nothing rather than everything, which is the difference between undoing a tap step and destroying the design.",
-      "⚠️ COMBINED TAPCELL IS 19 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin b5624809f29048e1f9ce9e83eb562620c652e084; upstream then reworked endcap placement across sixteen commits and added four regression cases. Three fixes have tracked that work -- the odb narrow-region cut height, row occupancy spanning polygons and holes, and corner displacement -- leaving ONE case, abutting_macros_step_no_corners, where four cells sit at the right coordinates under the wrong edge kind: a die-corner position upstream attributes to the horizontal edge and this engine to the vertical one. Cell count, positions and rows all match.",
+      "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin b5624809f29048e1f9ce9e83eb562620c652e084 and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
       "Row cutting itself is odb's own cutRows from odb/util.h, not a reimplementation: it is odb's algorithm on odb's rows, and OpenDB is the substrate. What this engine decides is the policy around it -- which instances are blockages, the halo, and the minimum row width.",
       "Blockages are placed macros (dbInst::isBlock). A macro that is NOT placed is skipped and reported by name (upstream TAP-32), never silently ignored, because rows would otherwise be left crossing wherever it lands.",
       "The minimum row width is the LARGER of two endcap widths and any --row-min-width given, so a caller's floor cannot quietly produce rows too narrow to cap.",
       "Halos and widths are given in MICRONS and converted with the database's dbu_per_micron. A database with no DBU scale is an error rather than an assumed scale.",
       "Written against the upstream tap regression goldens at pin 945a9f48dc6e5cc91d865daa92c45a1094cb682c (vyges-openroad 2026.08.0). Conformance for the implemented subset is measured by diffing the DEF ROWS section against each case's .defok: 10 of 10 comparable cases exact. ⚠️ A correlation result is a statement about ONE upstream commit -- this one was re-measured when the pin moved, and combined tapcell regressed from exact.",
-      "The corner classification is checked separately against the corner TYPE encoded in each golden's instance names (PHY_CORNER_ROW_0_OuterBottomLeft_0): 3 cases match exactly, including one exercising all 7 corner types on a polygon boundary. 5 more are UNRESOLVED because the golden counts corner cells PLACED and upstream places one only where a row reaches the corner -- so this engine reporting more corners than the golden has cells is expected there, and those become decidable once endcap placement exists. No case is missing a corner the golden placed.",
+      "The corner classification is no longer checked by a separate harness. That check compared this engine's corner CENSUS against the corner CELLS a golden holds and reported 4 exact and 6 unresolved; it was retired on 2026-08-23 because those 6 could never resolve -- upstream classifies every corner too and filters only at placement (getRow), so a corner no row reaches leaves no trace in any golden on either side. All 10 of its cases are compared cell by cell by the DEF gates instead, and the corner TYPE is part of the instance name those compare (PHY_CORNER_ROW_0_OuterBottomLeft_0), alongside master, position and orientation.",
       "The default output is IN PLACE, over the input database. Pass --out-odb to write elsewhere, or --dry-run to report without writing."
   ],
   "invocation": {
@@ -268,7 +270,8 @@ fn cut_rows(args: &[String]) -> ExitCode {
   \"rows_after\": {rows_after},
   \"odb_written\": {written}
 }}",
-        status = if cli.dry_run { "planned" } else { "applied" },
+        // A cut that changed no row count changed nothing — see `settle_status`.
+        status = vyges_tap::settle_status(cli.dry_run, (rows_after != rows_before) as usize),
         n_block = blockages.cut_around.len(),
         n_unplaced = blockages.unplaced.len(),
         written = match written.as_deref() {
@@ -516,7 +519,7 @@ fn finish(db: &Db, path: &str, opts: &Opts, planned: usize, what: &str) -> ExitC
     );
     println!(
         "{{\n  \"tool\": \"vyges-tap\",\n  \"status\": \"{}\",\n  \"{}\": {},\n  \"odb_written\": {}\n}}",
-        if opts.dry_run { "planned" } else { "applied" },
+        vyges_tap::settle_status(opts.dry_run, planned),
         what,
         planned,
         match written.as_deref() {

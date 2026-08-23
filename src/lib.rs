@@ -224,6 +224,48 @@ mod tests {
 ///
 /// Matching is by name because that is the only mark these cells carry: they are physical-only
 /// instances with no net, and nothing else distinguishes a tap from any other filler.
+/// The verdict word for a run that changed `did` things.
+///
+/// 🔑 **A pass word asserts that work was DONE; if none was, do not say it.** `applied` is what
+/// the descriptor's assertion reads (`status == "applied"`), so a run that inserted, cut or
+/// removed nothing would otherwise pass a gate having changed the design in no way at all. That
+/// is not a hypothetical failure mode here: an option that does not arrive does not error, it
+/// silently does nothing — `-halo_width_x` hid four cases that way, and `ppl` lost a day to
+/// `set_slots_per_section` doing the same.
+///
+/// ⚠️ **`vacuous` is not an error.** Zero may be the right answer — a design with no macros cuts
+/// no rows. The caller reads the count and decides; what it must not do is read a no-op as a
+/// verified transformation. A dry run keeps `planned`, which never claimed to have applied
+/// anything and already fails the assertion.
+pub fn settle_status(dry_run: bool, did: usize) -> &'static str {
+    if dry_run {
+        return "planned";
+    }
+    if did == 0 {
+        return "vacuous";
+    }
+    "applied"
+}
+
+#[cfg(test)]
+mod settle_status_tests {
+    use super::settle_status;
+
+    #[test]
+    fn a_run_that_changed_nothing_is_not_reported_as_applied() {
+        assert_eq!(settle_status(false, 0), "vacuous");
+        assert_eq!(settle_status(false, 1), "applied");
+    }
+
+    #[test]
+    fn a_dry_run_never_claims_to_have_applied_anything() {
+        // `planned` already fails the declared assertion, so it needs no vacuous variant of its
+        // own — and giving it one would churn every dry-run consumer for no safety gain.
+        assert_eq!(settle_status(true, 0), "planned");
+        assert_eq!(settle_status(true, 9), "planned");
+    }
+}
+
 pub fn cells_with_prefix(names: &[String], prefix: &str) -> Vec<String> {
     if prefix.is_empty() {
         return Vec::new();

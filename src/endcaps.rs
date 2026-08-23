@@ -47,6 +47,32 @@ pub struct EndcapMasters {
 }
 
 impl EndcapMasters {
+    /// The extent of a placed master, by name — for recording what a row now holds.
+    ///
+    /// ⚠️ **Every field, not just the edges.** A row's occupancy has to cover whatever was put
+    /// there, and the inner-corner masters are placed by the edge paths too.
+    pub fn extent_of(&self, name: &str) -> Option<(i32, i32)> {
+        let singles = [
+            &self.left_top_corner,
+            &self.right_top_corner,
+            &self.left_bottom_corner,
+            &self.right_bottom_corner,
+            &self.left_top_edge,
+            &self.right_top_edge,
+            &self.left_bottom_edge,
+            &self.right_bottom_edge,
+            &self.left_edge,
+            &self.right_edge,
+        ];
+        singles
+            .into_iter()
+            .flatten()
+            .chain(self.top_edge.iter())
+            .chain(self.bottom_edge.iter())
+            .find(|m| m.name == name)
+            .map(|m| (m.width, m.height))
+    }
+
     /// The site corner placement works in, taken from the first master that states one.
     ///
     /// The order is upstream's and is arbitrary but fixed; it only matters when a technology
@@ -692,6 +718,93 @@ pub fn rows_on_edge<'a>(edge: &Edge, rows: &'a [Row], site: &str) -> Vec<&'a Row
 ///
 /// Corners go first so the edge fills can shrink away from them, and each distinct edge is filled
 /// once even when two polygons of the region share it.
+/// **T14** — everything in a row that an EDGE has to avoid: the corners and the earlier edges.
+///
+/// 🔑 Upstream's `occupiedSpans` is exactly this union — `occupied_row_spans_` plus the bounding
+/// boxes in `placed_corners_`. Consulting only the corners lets an edge land on an edge.
+fn occupancy_of(
+    corners: &std::collections::BTreeMap<String, Vec<PlacedCorner>>,
+    edges: &std::collections::BTreeMap<String, Vec<Rect>>,
+    row: &str,
+) -> Vec<Rect> {
+    let mut all: Vec<Rect> = corners
+        .get(row)
+        .map(|v| v.iter().map(|c| c.rect).collect())
+        .unwrap_or_default();
+    if let Some(e) = edges.get(row) {
+        all.extend(e.iter().copied());
+    }
+    all
+}
+
+/// Note the span an edge cell now occupies, so nothing else is placed on top of it.
+fn note_edges(
+    edges: &mut std::collections::BTreeMap<String, Vec<Rect>>,
+    row: &str,
+    placed: &[Placement],
+    masters: &EndcapMasters,
+) {
+    for p in placed {
+        if let Some((w, h)) = masters.extent_of(&p.master) {
+            edges
+                .entry(row.to_string())
+                .or_default()
+                .push(Rect::new(p.x, p.y, p.x + w, p.y + h));
+        }
+    }
+}
+
+/// **T11** — a corner already placed in this row, and whether we may take it back.
+#[derive(Debug, Clone)]
+struct PlacedCorner {
+    rect: Rect,
+    /// Where it sits in the output, so displacement can remove it.
+    out_idx: usize,
+    /// Which ring placed it. ⚠️ **Only a corner from the SAME ring may be displaced** — upstream's
+    /// `area_corners` is per area, and `placed_corners_` outlives it.
+    ring: usize,
+}
+
+/// Do two rectangles share any area? Touching edges do not count.
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a.x1 > b.x0 && b.x1 > a.x0 && a.y1 > b.y0 && b.y1 > a.y0
+}
+
+/// **T12** — is this cell flush with either end of its row?
+///
+/// 🔑 **This is the whole of the displacement priority.** A corner AT the row end has nowhere else
+/// to go, so it wins; one in the middle can be given up. Upstream calls it `isAtRowEnd` and tests
+/// only x, because a row is one cell tall.
+fn is_at_row_end(cell: Rect, row: Rect) -> bool {
+    cell.x0 == row.x0 || cell.x1 == row.x1
+}
+
+/// **T13** — resolve a proposed corner against what this row already holds.
+///
+/// Upstream's rule, verbatim in behaviour: *"a corner at the row end displaces a same-area corner
+/// that is not at it; otherwise the new corner is skipped."*
+///
+/// ⚠️ **`else return` — not `else continue`.** One losing overlap abandons the corner outright;
+/// it does not carry on hoping a later overlap is displaceable.
+///
+/// Returns the indices to displace, or `None` to skip this corner.
+fn resolve_corner(cell: Rect, row_bbox: Rect, ring: usize, placed: &[PlacedCorner]) -> Option<Vec<usize>> {
+    let cell_at_end = is_at_row_end(cell, row_bbox);
+    let mut displaced = Vec::new();
+    for other in placed {
+        if !rects_overlap(cell, other.rect) {
+            continue;
+        }
+        let other_at_end = is_at_row_end(other.rect, row_bbox);
+        if cell_at_end && !other_at_end && other.ring == ring {
+            displaced.push(other.out_idx);
+        } else {
+            return None;
+        }
+    }
+    Some(displaced)
+}
+
 pub fn place_all(
     classified: &[crate::boundary::ClassifiedPolygon],
     rows: &[Row],
@@ -700,6 +813,18 @@ pub fn place_all(
 ) -> Vec<Placement> {
     let mut out: Vec<Placement> = Vec::new();
     let mut filled: Vec<(EdgeType, i32, i32, i32, i32)> = Vec::new();
+    // 🔑 **What each row already holds, PERSISTED ACROSS POLYGONS AND HOLES**, and split in two
+    // because the halves have different powers. Upstream's `placed_corners_` is cleared once at
+    // the end of the whole insertion — *"edges and corners of one macro's hole see the corners
+    // already placed by an adjacent macro's hole in the same row"*.
+    //
+    // ⚠️ **Corners can be DISPLACED; edge spans cannot.** `occupied_row_spans_` blocks
+    // unconditionally, `placed_corners_` only when the newcomer does not out-rank it.
+    let mut placed_corners: std::collections::BTreeMap<String, Vec<PlacedCorner>> =
+        Default::default();
+    let mut edge_spans: std::collections::BTreeMap<String, Vec<Rect>> = Default::default();
+    let mut dead: std::collections::HashSet<usize> = Default::default();
+    let mut ring_id = 0usize;
 
     for poly in classified {
         // Upstream walks each RING in turn -- the outer boundary's corners then its edges, then
@@ -711,21 +836,41 @@ pub fn place_all(
                 .collect();
 
         for (corners, edges) in rings {
-            let mut per_row: std::collections::BTreeMap<String, Vec<Rect>> = Default::default();
+            ring_id += 1;
             if let Some(site) = masters.corner_site() {
                 for c in corners {
                     let Some(row) = row_at_corner(c, rows, site) else {
                         continue;
                     };
                     if let Some(p) = place_corner(c, row, masters, phy_index) {
-                        if let Some(m) = masters.for_corner(c.kind, row.orient == "R0") {
-                            per_row.entry(row.name.clone()).or_default().push(Rect::new(
-                                p.x,
-                                p.y,
-                                p.x + m.width,
-                                p.y + m.height,
-                            ));
+                        let Some(m) = masters.for_corner(c.kind, row.orient == "R0") else {
+                            out.push(p);
+                            continue;
+                        };
+                        let cell = Rect::new(p.x, p.y, p.x + m.width, p.y + m.height);
+                        let existing = placed_corners.entry(row.name.clone()).or_default();
+                        let Some(displaced) =
+                            resolve_corner(cell, row.bbox, ring_id, existing)
+                        else {
+                            continue; // an overlap this corner does not out-rank
+                        };
+                        // ⚠️ **An EDGE cell blocks outright** — it is not ours to take back.
+                        if edge_spans
+                            .get(&row.name)
+                            .is_some_and(|v| v.iter().any(|r| rects_overlap(cell, *r)))
+                        {
+                            continue;
                         }
+                        for idx in &displaced {
+                            dead.insert(*idx);
+                        }
+                        let existing = placed_corners.entry(row.name.clone()).or_default();
+                        existing.retain(|c| !displaced.contains(&c.out_idx));
+                        existing.push(PlacedCorner {
+                            rect: cell,
+                            out_idx: out.len(),
+                            ring: ring_id,
+                        });
                         out.push(p);
                     }
                 }
@@ -746,9 +891,10 @@ pub fn place_all(
                         let Some(row) = rows_on_edge(e, rows, site).into_iter().next() else {
                             continue;
                         };
-                        let empty = Vec::new();
-                        let cs = per_row.get(&row.name).unwrap_or(&empty);
-                        out.extend(place_edge_horizontal(e, row, cs, masters, phy_index));
+                        let cs = occupancy_of(&placed_corners, &edge_spans, &row.name);
+                        let placed = place_edge_horizontal(e, row, &cs, masters, phy_index);
+                        note_edges(&mut edge_spans, &row.name, &placed, masters);
+                        out.extend(placed);
                     }
                     EdgeType::Left | EdgeType::Right => {
                         let master = match e.kind {
@@ -759,11 +905,16 @@ pub fn place_all(
                             continue;
                         };
                         for row in rows_on_edge(e, rows, &master.site) {
-                            let empty = Vec::new();
-                            let cs = per_row.get(&row.name).unwrap_or(&empty);
+                            let cs = occupancy_of(&placed_corners, &edge_spans, &row.name);
                             if let Some(p) =
-                                place_edge_vertical(e.kind, row, cs, masters, phy_index)
+                                place_edge_vertical(e.kind, row, &cs, masters, phy_index)
                             {
+                                note_edges(
+                                    &mut edge_spans,
+                                    &row.name,
+                                    std::slice::from_ref(&p),
+                                    masters,
+                                );
                                 out.push(p);
                             }
                         }
@@ -772,7 +923,13 @@ pub fn place_all(
             }
         }
     }
-    out
+    // ⚠️ **Displaced corners are removed HERE, not in place** — removing mid-run would shift
+    // every later index and silently displace the wrong cell.
+    out.into_iter()
+        .enumerate()
+        .filter(|(i, _)| !dead.contains(i))
+        .map(|(_, p)| p)
+        .collect()
 }
 #[cfg(test)]
 mod orchestration_tests {

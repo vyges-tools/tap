@@ -69,10 +69,16 @@ the row it lands in.
 | --- | --- |
 | `cut_rows` | **10 of 10** comparable cases exact |
 | endcaps | **9 of 9** exact |
-| combined `tapcell` | ⚠️ **14 of 20** — was 16 of 16 at pin `b5624809` |
+| combined `tapcell` | ⚠️ **19 of 20** — was 16 of 16 at pin `b5624809` |
 
 Every physical cell is compared — name, master, position, orientation — plus the DEF `ROW` lines.
 The largest case places 22,844 cells.
+
+**Where it stands.** Three fixes have tracked upstream's rework: the odb narrow-region cut height,
+row occupancy persisting across polygons and holes, and corner displacement. One case remains —
+`abutting_macros_step_no_corners`, where four cells sit at the right coordinates under the wrong
+edge kind: a die-corner position upstream attributes to the horizontal edge and this engine to the
+vertical one. Cell count, positions and rows all match.
 
 **Why combined `tapcell` regressed.** Between the two pins upstream changed endcap and tapcell
 placement across five commits — `src/tap` moved by 32 files, +8,323/−243 — and this engine has not

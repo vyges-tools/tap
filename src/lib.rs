@@ -80,6 +80,31 @@ pub fn min_row_width(endcap_width: Option<i32>, row_min_width: Option<i32>) -> i
     from_endcap.max(row_min_width.unwrap_or(0))
 }
 
+/// **T10** — the shortest row worth keeping, which is what odb cuts narrow regions against.
+///
+/// 🔑 **A region between two vertically stacked blockages has to fit an endcap ABOVE, an endcap
+/// BELOW, and a cell between them** — so the floor is `2 * endcap height + the tallest core cell`,
+/// and `2 * the tallest core cell` where no endcap master was given.
+///
+/// ⚠️ **Zero is not the neutral value here, it is "do not cut narrow regions at all".** odb gates
+/// the whole check on `min_row_height > 0`, so passing 0 silently keeps slivers a tapcell run can
+/// never fill. `ifp` passes 0 deliberately — it is not placing endcaps — and `tap` must not.
+///
+/// ⚠️ **The tallest CORE cell, not the tallest master.** Blocks, pads, covers, endcaps and fillers
+/// are excluded, and so is anything the library marks as not auto-placeable: a macro's height would
+/// put the floor far above any real row.
+pub fn min_row_height(
+    endcap_height: Option<i32>,
+    max_core_cell_height: i32,
+    row_min_height: Option<i32>,
+) -> i32 {
+    let from_endcap = match endcap_height {
+        Some(h) => 2 * h + max_core_cell_height,
+        None => 2 * max_core_cell_height,
+    };
+    from_endcap.max(row_min_height.unwrap_or(0))
+}
+
 /// A value the caller gave, or the default, resolved once so the applier never re-derives it.
 ///
 /// Upstream encodes "not given" as a negative number; this keeps the distinction in the type so
@@ -94,6 +119,32 @@ pub fn or_default(given: Option<i32>, default: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_minimum_row_height_stacks_two_endcaps_and_a_cell() {
+        // Upstream rule: 2 * endcap height + the tallest core cell — a narrow region must fit an
+        // endcap above, one below, and a placeable cell between them.
+        assert_eq!(min_row_height(Some(1400), 2800, None), 5600);
+    }
+
+    #[test]
+    fn with_no_endcap_master_it_is_two_core_cells() {
+        assert_eq!(min_row_height(None, 2800, None), 5600);
+    }
+
+    #[test]
+    fn a_callers_floor_wins_when_it_is_larger() {
+        assert_eq!(min_row_height(Some(1400), 2800, Some(9000)), 9000);
+        assert_eq!(min_row_height(Some(1400), 2800, Some(1000)), 5600, "and loses when smaller");
+    }
+
+    #[test]
+    fn ZERO_would_disable_the_check_entirely_so_it_is_never_the_answer_here() {
+        // ⚠️ odb gates narrow-region cutting on `min_row_height > 0`. `ifp` passes 0 because it
+        // places no endcaps; a tapcell run passing 0 keeps slivers it can never fill.
+        assert!(min_row_height(None, 2800, None) > 0);
+        assert!(min_row_height(None, 0, Some(0)) == 0, "only a library with no core cells at all");
+    }
 
     fn inst(name: &str, is_block: bool, is_placed: bool) -> Instance {
         Instance {

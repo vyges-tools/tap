@@ -10,7 +10,8 @@ use vyges_tap::boundary;
 use vyges_tap::endcaps::{self, EndcapMasters, TapcellMasters};
 use vyges_tap::tapcells::{self, Master, Placement};
 use vyges_tap::{
-    cells_with_prefix, default_distance, min_row_width, or_default, select_blockages, Instance,
+    cells_with_prefix, default_distance, min_row_height, min_row_width, or_default,
+    select_blockages, Instance,
 };
 
 const USAGE: &str = "\
@@ -35,6 +36,7 @@ OPTIONS:
   --halo-x UM            keep-out around a macro, horizontally, in MICRONS (default 2)
   --halo-y UM            keep-out around a macro, vertically, in MICRONS (default 2)
   --row-min-width UM     do not leave a row narrower than this, in MICRONS
+  --row-min-height UM    do not leave a row region shorter than this, in MICRONS
   --endcap-master NAME   reserve room for one endcap at each end of every row
   --out-odb FILE         write the database here (default: IN PLACE, over the input)
   --out-def FILE         also write the result as DEF (for diffing against a golden)
@@ -104,6 +106,7 @@ struct Cli {
     halo_x: Option<f64>,
     halo_y: Option<f64>,
     row_min_width: Option<f64>,
+    row_min_height: Option<f64>,
     endcap_master: Option<String>,
     out_odb: Option<String>,
     out_def: Option<String>,
@@ -144,6 +147,10 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
             "--row-min-width" => {
                 let v = value()?;
                 cli.row_min_width = Some(number(v)?);
+            }
+            "--row-min-height" => {
+                let v = value()?;
+                cli.row_min_height = Some(number(v)?);
             }
             "--endcap-master" => cli.endcap_master = Some(value()?),
             "--out-odb" => cli.out_odb = Some(value()?),
@@ -209,11 +216,23 @@ fn cut_rows(args: &[String]) -> ExitCode {
     let halo_x = or_default(cli.halo_x.map(|v| to_dbu(v, dbu_f)), default);
     let halo_y = or_default(cli.halo_y.map(|v| to_dbu(v, dbu_f)), default);
     let min_width = min_row_width(endcap_width, cli.row_min_width.map(|v| to_dbu(v, dbu_f)));
+    // 🔑 **Not zero.** odb gates narrow-region cutting on `min_row_height > 0`, and a tapcell run
+    // that passes 0 keeps slivers it can never fill — see `min_row_height`.
+    let endcap_height = cli
+        .endcap_master
+        .as_deref()
+        .map(|m| db.master_get_height(m) as i32);
+    let min_height = min_row_height(
+        endcap_height,
+        max_core_cell_height(&db),
+        cli.row_min_height.map(|v| to_dbu(v, dbu_f)),
+    );
 
     let rows_before = db.num_rows().unwrap_or(0);
     let mut written: Option<String> = None;
     if !cli.dry_run {
-        if let Err(e) = db.cut_rows(min_width, 0, &blockages.cut_around, halo_x, halo_y) {
+        if let Err(e) = db.cut_rows(min_width, min_height, &blockages.cut_around, halo_x, halo_y)
+        {
             eprintln!("vyges-tap: cannot cut rows: {e}");
             return ExitCode::from(2);
         }
@@ -345,6 +364,34 @@ fn boundary_report(args: &[String]) -> ExitCode {
         corner_json
     );
     ExitCode::SUCCESS
+}
+
+/// **`Tapcell::maxCoreCellHeight`** — the tallest master a row actually has to hold.
+///
+/// ⚠️ **Core, auto-placeable, and none of the special kinds.** Blocks, pads, covers, endcaps and
+/// fillers are all skipped, as is anything the library marks not auto-placeable — a macro's height
+/// would put the row-height floor above every real row and cut the design to pieces.
+fn max_core_cell_height(db: &Db) -> i32 {
+    let mut tallest = 0;
+    for i in 0..db.num_masters().unwrap_or(0) {
+        let Ok(m) = db.nth_master_name(i) else { continue };
+        if !db.master_is_core_auto_placeable(&m) {
+            continue;
+        }
+        let kind = db.master_get_type(&m).unwrap_or_default();
+        // ⚠️ odb spells these with a SPACE ("CORE SPACER", "ENDCAP TOPLEFT"), not the enum
+        // spelling — the same trap that made every endcap invisible once before.
+        if kind.starts_with("BLOCK")
+            || kind.starts_with("PAD")
+            || kind.starts_with("COVER")
+            || kind.starts_with("ENDCAP")
+            || kind.contains("SPACER")
+        {
+            continue;
+        }
+        tallest = tallest.max(db.master_get_height(&m) as i32);
+    }
+    tallest
 }
 
 /// Read a master's properties, or report why it cannot be used.
@@ -846,11 +893,17 @@ fn tapcell(args: &[String]) -> ExitCode {
         .collect();
     let blockages = select_blockages(&instances);
     let default = default_distance(dbu as i32);
-    // ⚠️ 0 = odb narrow-region cutting OFF, which is what upstream ifp passes and what keeps
-    // this a signature change rather than a behaviour change. See Db::cut_rows.
+    // 🔑 **The narrow-region floor, and it must not be zero here.** odb gates the check on
+    // `min_row_height > 0`; a tapcell run passing 0 leaves regions between stacked blockages that
+    // no endcap can ever fill. `ifp` passes 0 because it places no endcaps — see `min_row_height`.
+    let min_height = min_row_height(
+        flat.endcap_master.as_ref().map(|m| m.height),
+        max_core_cell_height(&db),
+        None,
+    );
     if let Err(e) = db.cut_rows(
         min_row_width(flat.endcap_master.as_ref().map(|m| m.width), row_min),
-        0,
+        min_height,
         &blockages.cut_around,
         or_default(halo_x, default),
         or_default(halo_y, default),

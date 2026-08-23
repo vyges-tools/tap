@@ -718,6 +718,27 @@ pub fn rows_on_edge<'a>(edge: &Edge, rows: &'a [Row], site: &str) -> Vec<&'a Row
 ///
 /// Corners go first so the edge fills can shrink away from them, and each distinct edge is filled
 /// once even when two polygons of the region share it.
+/// **T15** — start a ring's edge list where upstream starts it.
+///
+/// 🔑 **The ORDER decides who wins a contested position.** Where a horizontal and a vertical edge
+/// both reach a die corner, whichever is placed first claims it and occupancy blocks the other.
+/// `abutting_macros_step_no_corners` says so in its own header: *"the horizontal edge fills and the
+/// row-end endcaps must not be placed on top of each other"*.
+///
+/// ⚠️ **The cycle and the classifications already agree; only the starting vertex differs.**
+/// Measured on that case, ours began at `(0, 282800)` and upstream at `(0, 0)` — the same four
+/// edges rotated by one, so our `Left` claimed the origin where upstream's `Bottom` should.
+///
+/// ℹ️ Upstream's order is whatever Boost hands it, which is not a stated rule; the lowest-then-
+/// leftmost vertex reproduces it for an outer boundary, which is where the contested die corners
+/// are.
+fn rotate_to_lowest_left(edges: &[Edge]) -> Vec<Edge> {
+    let Some(start) = (0..edges.len()).min_by_key(|&i| (edges[i].p0.y, edges[i].p0.x)) else {
+        return edges.to_vec();
+    };
+    edges[start..].iter().chain(&edges[..start]).cloned().collect()
+}
+
 /// **T14** — everything in a row that an EDGE has to avoid: the corners and the earlier edges.
 ///
 /// 🔑 Upstream's `occupiedSpans` is exactly this union — `occupied_row_spans_` plus the bounding
@@ -837,6 +858,16 @@ pub fn place_all(
 
         for (corners, edges) in rings {
             ring_id += 1;
+            // Mirrors upstream's `TAP Endcap 2` debug group, so the two edge lists can be diffed
+            // directly rather than inferred from the cells they place.
+            if std::env::var_os("TAP_EDGE_TRACE").is_some() {
+                for e in &rotate_to_lowest_left(edges) {
+                    eprintln!(
+                        "[edge] ({}, {}) - ({}, {}) : {:?}",
+                        e.p0.x, e.p0.y, e.p1.x, e.p1.y, e.kind
+                    );
+                }
+            }
             if let Some(site) = masters.corner_site() {
                 for c in corners {
                     let Some(row) = row_at_corner(c, rows, site) else {
@@ -876,7 +907,8 @@ pub fn place_all(
                 }
             }
 
-            for e in edges {
+            let ordered = rotate_to_lowest_left(edges);
+            for e in &ordered {
                 let key = (e.kind, e.p0.x, e.p0.y, e.p1.x, e.p1.y);
                 if filled.contains(&key) {
                     continue;

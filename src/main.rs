@@ -14,23 +14,30 @@ use vyges_tap::{
     select_blockages, Instance,
 };
 
+// ⚠️ The prefix here is the CLI GROUP this engine belongs to, and vyges-cli's MODULES
+// registry is what actually decides it (`group: "physical"`). It read `vyges loom tap`
+// for a release after the construction engines were split out of the loom suite, because
+// nothing ties this string to that registry -- `vyges loom tap` is now REFUSED by the CLI,
+// so the help was telling users a command that no longer runs. If the group ever moves,
+// this string moves with it. Running the binary directly as `vyges-tap` always works and
+// is group-independent.
 const USAGE: &str = "\
-vyges loom tap — row cutting and physical-cell insertion
+vyges physical tap — row cutting and physical-cell insertion
 
 USAGE:
-  vyges loom tap cut-rows <design.odb> [--halo-x UM] [--halo-y UM] [--row-min-width UM]
+  vyges physical tap cut-rows <design.odb> [--halo-x UM] [--halo-y UM] [--row-min-width UM]
                                        [--endcap-master NAME]
-  vyges loom tap place-tapcells <design.odb> --master NAME [--distance UM] [--tap-prefix P]
-  vyges loom tap place-endcaps <design.odb> [--corner NAME] [--edge-corner NAME]
+  vyges physical tap place-tapcells <design.odb> --master NAME [--distance UM] [--tap-prefix P]
+  vyges physical tap place-endcaps <design.odb> [--corner NAME] [--edge-corner NAME]
                                [--endcap-horizontal A,B] [--endcap-vertical NAME]
                                [--left-top-corner NAME] ... [--prefix P]
-  vyges loom tap tapcell <design.odb> --tapcell-master NAME --endcap-master NAME
+  vyges physical tap tapcell <design.odb> --tapcell-master NAME --endcap-master NAME
                           [--distance UM] [--halo-width-x UM] [--halo-width-y UM]
                           [--cnrcap-nwin-master NAME] [--tap-nwintie-master NAME] ...
-  vyges loom tap ripup <design.odb> [--tap-prefix TAP_] [--endcap-prefix PHY_]
-  vyges loom tap boundary <design.odb>
-  vyges loom tap --describe
-  vyges loom tap --help
+  vyges physical tap ripup <design.odb> [--tap-prefix TAP_] [--endcap-prefix PHY_]
+  vyges physical tap boundary <design.odb>
+  vyges physical tap --describe
+  vyges physical tap --help
 
 OPTIONS:
   --halo-x UM            keep-out around a macro, horizontally, in MICRONS (default 2)
@@ -81,7 +88,7 @@ const DESCRIBE: &str = r#"{
   "maturity": "structured",
   "provenance_limitations": [
       "input_hash covers the argument vector, not the content of the .odb it names.",
-      "The boundary classification (row region, edge and corner types) is implemented and inspectable with the `boundary` verb, but NOTHING IS PLACED from it yet. ONLY `cut-rows` mutates the design.",
+      "The `boundary` verb is INSPECT-ONLY: it reports the row-region, edge and corner classification and writes nothing. Every other verb that places (`place-endcaps`, `place-tapcells`, `tapcell`) does mutate the design -- they create physical instances, orient, locate, lock and mark them -- as does `cut-rows`, and `ripup` removes them. This line previously read \"NOTHING IS PLACED from it yet, ONLY cut-rows mutates\", which was true of an early build and stayed here after placement shipped and was measured exact; it is corrected rather than deleted because a reader who saw the old text needs to know it moved, not wonder which of two claims to believe.",
       "Unnamed endcap positions are filled from the library's own LEF58 master types (odb reports these as space-separated strings like \"ENDCAP LEFTBOTTOMCORNER\", not the enum spelling). Two masters claiming one position is an ERROR naming both, not a coin flip: a wrong endcap is a well-tie fault nobody sees until silicon. A position nothing fills stays empty and places nothing.",
       "Taps and endcaps use DIFFERENT default name prefixes -- TAP_ and PHY_ -- because they are separate namespaces that can be ripped up independently.",
       "MEASURED 2026-08-23 against the upstream goldens at pin @OPENROAD_PIN@: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), and endcap placement 9 of 9 exact -- every physical cell matching the golden in master, position and orientation.",

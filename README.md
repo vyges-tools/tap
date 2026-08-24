@@ -6,7 +6,7 @@ All five commands are implemented and checked against the upstream goldens: `cut
 `place-endcaps`, `place-tapcells`, the combined `tapcell`, and `ripup`.
 
 ```text
-vyges loom tap cut-rows design.odb --endcap-master TAPCELL_X1 --halo-x 2 --halo-y 2
+vyges physical tap cut-rows design.odb --endcap-master TAPCELL_X1 --halo-x 2 --halo-y 2
 ```
 
 ## What `cut-rows` does
@@ -121,7 +121,7 @@ rule, so reproducing it would mean reverse-engineering a library's internals.
 
 ## The boundary classification
 
-`vyges loom tap boundary design.odb` reports the row region — how many connected pieces, how many
+`vyges physical tap boundary design.odb` reports the row region — how many connected pieces, how many
 holes, and the census of corner types. Endcap placement is driven entirely by that classification,
 so being able to see it before any cell is placed is what makes it checkable.
 

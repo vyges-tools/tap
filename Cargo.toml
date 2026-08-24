@@ -1,6 +1,6 @@
 [package]
 name = "vyges-tap"
-version = "0.1.32"
+version = "0.1.33"
 edition = "2021"
 description = "Tapcell and endcap insertion over the OpenDB database: row cutting, well taps, and boundary cells."
 license = "Apache-2.0"

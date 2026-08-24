@@ -18,6 +18,12 @@
 //! function), extracted by reading OpenROAD's `tapcell.cpp` — the reference implementation for
 //! this behaviour. Nothing is copied from it.
 
+/// This crate's version, as Cargo knows it — the single number the whole suite is released on.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The copyright line `--version` prints.
+pub const COPYRIGHT: &str = "© 2026 Vyges. All Rights Reserved.  https://vyges.com";
+
 pub mod boundary;
 pub mod endcaps;
 pub mod tapcells;

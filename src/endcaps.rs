@@ -939,7 +939,16 @@ pub fn place_all(
 
             let ordered = rotate_to_lowest_left(edges);
             for e in &ordered {
-                let key = (e.kind, e.p0.x, e.p0.y, e.p1.x, e.p1.y);
+                // 🔑 **The key is DIRECTION-INSENSITIVE, because upstream's `Edge::operator==` is:**
+                // `type == other.type && ((pt0, pt1) == (o.pt0, o.pt1) || (pt0, pt1) == (o.pt1, o.pt0))`.
+                // The same segment reached from two rings arrives reversed — an island's outer
+                // boundary and the enclosing hole's inward excursion are the same metal — and the
+                // hole flip is built so both give it the SAME type. Verified on `region1`: all three
+                // shared segments classify Bottom/Right/Left from either side. An ordered key fills
+                // them twice.
+                let (a, b) = ((e.p0.x, e.p0.y), (e.p1.x, e.p1.y));
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                let key = (e.kind, lo.0, lo.1, hi.0, hi.1);
                 if filled.contains(&key) {
                     continue;
                 }
@@ -1143,6 +1152,35 @@ mod orchestration_tests {
             !inner.is_empty(),
             "the hole's corners were never capped: {out:?}"
         );
+    }
+
+    #[test]
+    fn a_segment_reached_from_two_rings_is_filled_once_either_way_round() {
+        // Upstream's `Edge::operator==` matches the same segment traversed in EITHER direction,
+        // provided the type agrees. Two rings can present one piece of metal reversed — an island's
+        // outer boundary and the enclosing hole's inward excursion around it — and the hole flip is
+        // built so both give it the same type. An ordered key fills such a segment twice.
+        //
+        // Measured on region1 at pin 945a9f4: the three segments the island and the hole share
+        // classify Bottom, Right and Left from either side.
+        let e = |kind, a: (i32, i32), b: (i32, i32)| Edge {
+            kind,
+            p0: Point { x: a.0, y: a.1 },
+            p1: Point { x: b.0, y: b.1 },
+        };
+        let fwd = e(EdgeType::Bottom, (40020, 40800), (149960, 40800));
+        let rev = e(EdgeType::Bottom, (149960, 40800), (40020, 40800));
+
+        let key = |x: &Edge| {
+            let (a, b) = ((x.p0.x, x.p0.y), (x.p1.x, x.p1.y));
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            (x.kind, lo.0, lo.1, hi.0, hi.1)
+        };
+        assert_eq!(key(&fwd), key(&rev), "the same metal, reached from two rings");
+
+        // ...but a DIFFERENT type on the same segment is a different edge, as upstream requires.
+        let other_type = e(EdgeType::Top, (149960, 40800), (40020, 40800));
+        assert_ne!(key(&fwd), key(&other_type), "type is part of the identity");
     }
 
     #[test]

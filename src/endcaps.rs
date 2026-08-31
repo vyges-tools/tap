@@ -245,19 +245,35 @@ pub fn place_edge_horizontal(
     let mut x = x0;
     while x < x1 {
         let remaining = x1 - x;
-        // A master that divides the rest exactly leaves no ragged final cell; if none does, the
-        // narrowest is the best chance of fitting.
-        let master = choices
-            .iter()
-            .find(|m| remaining % m.width == 0)
-            .copied()
-            .unwrap_or_else(|| choices[choices.len() - 1]);
-
-        if !check_symmetry(master.symmetry_x, master.symmetry_y, &row.orient) {
-            // Upstream `continue`s here without advancing, which cannot terminate. Stopping is
-            // the only sane reading: no master in this list can legally sit in this row.
-            break;
+        // Upstream `fillEndcapEdge::pick_next_master`: walk the width-sorted list, SKIPPING any
+        // master that cannot legally sit in this row's orientation, and take the first — widest —
+        // whose width divides the REMAINING span exactly. If none does, take the last one still
+        // standing, which is the narrowest that PASSED symmetry.
+        //
+        // ⛔ **The symmetry test belongs inside this walk.** Choosing first and testing afterwards
+        // rejects a master upstream would simply have skipped over, and falls back to one upstream
+        // would never have considered. `checkSymmetry` is false for any MX row whose master lacks
+        // X symmetry, and rows alternate R0/MX, so this is ordinary rather than exotic.
+        //
+        // ⚠️ The comment here previously justified the old order by saying upstream `continue`s
+        // "without advancing, which cannot terminate". It does not: that `continue` is inside the
+        // master-selection loop and advances to the next master. The rationale was a misreading.
+        let mut fallback: Option<&Master> = None;
+        let mut chosen: Option<&Master> = None;
+        for &m in choices.iter() {
+            if !check_symmetry(m.symmetry_x, m.symmetry_y, &row.orient) {
+                continue;
+            }
+            fallback = Some(m);
+            if remaining % m.width == 0 {
+                chosen = Some(m);
+                break;
+            }
         }
+        let Some(master) = chosen.or(fallback) else {
+            // No master in this list can legally sit in this row. Upstream reaches TAP-20 here.
+            break;
+        };
         if x + master.width > x1 {
             // Upstream raises TAP-20 and aborts the run. Here the caller decides what an
             // unfillable boundary means, so the fill stops and reports what it managed.
@@ -555,6 +571,36 @@ mod tests {
         assert_eq!(out.len(), 2, "80 divides by the 40-wide master");
         assert!(out.iter().all(|p| p.master == "BE4"));
         assert_eq!(out.iter().map(|p| p.x).collect::<Vec<_>>(), vec![0, 40]);
+    }
+
+    #[test]
+    fn a_master_that_cannot_sit_in_the_row_is_skipped_over_not_selected_then_rejected() {
+        // Upstream's pick_next_master skips a master failing checkSymmetry and keeps walking, so
+        // the exact divisor may be a NARROWER master and the fallback is the narrowest that
+        // PASSED. Selecting first and testing afterwards abandons the fill instead.
+        //
+        // MX row, so checkSymmetry is symmetry_x. The 40-wide master divides the 80 span exactly
+        // but is not X-symmetric; the 20-wide one is. Upstream fills with four of the 20.
+        // ⚠️ A Bottom edge in an MX row draws from top_edge, not bottom_edge — the same R0
+        // crossing placeEndcapEdgeHorizontal applies. Setting the wrong list tests nothing.
+        let mut ms = masters();
+        ms.top_edge = vec![
+            Master { symmetry_x: false, ..m("BE_WIDE", 40, 10) },
+            Master { symmetry_x: true, ..m("BE_NARROW", 20, 10) },
+        ];
+        let e = Edge {
+            kind: EdgeType::Bottom,
+            p0: Point::new(0, 0),
+            p1: Point::new(80, 0),
+        };
+        let mut idx = 0;
+        let out = place_edge_horizontal(&e, &row("ROW_0", "MX", 0, 80, 0), &[], &ms, &mut idx);
+        assert_eq!(out.len(), 4, "the span is filled, not abandoned: {out:?}");
+        assert!(
+            out.iter().all(|p| p.master == "BE_NARROW"),
+            "the wide master cannot sit in an MX row and is skipped over: {out:?}"
+        );
+        assert_eq!(out.iter().map(|p| p.x).collect::<Vec<_>>(), vec![0, 20, 40, 60]);
     }
 
     #[test]

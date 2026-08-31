@@ -733,14 +733,27 @@ pub fn rows_on_edge<'a>(edge: &Edge, rows: &'a [Row], site: &str) -> Vec<&'a Row
 /// lowest** reproduces it for 45 of the 48 rings measured across the whole suite at pin `945a9f4`
 /// — every outer boundary bar two, and every hole bar one.
 ///
-/// ⛔ **MEASURED WRONG for three rings, and left that way deliberately.** `cut_rows_min_step_top_left`
-/// and `endcap_corners` start at a re-entrant vertex of their outline, and
-/// `single_row_macros_offset`'s hole starts at `(49400, 140000)` when this rule picks
-/// `(11400, 28000)`. All three are polygons whose boundary touches itself, so Boost's scanline
-/// closes them somewhere other than their leftmost vertex; deriving *where* means reproducing
-/// `polygon_90_set_data::get_polygons`, which has not been done. The predecessor rule
-/// (lowest-then-leftmost) was wrong on those same three AND on three more, so this is strictly
-/// better rather than complete — do not fit a fourth rule to the remainder.
+/// ⛔ **MEASURED WRONG, and the reason recorded here until 2026-08-31 was FALSE.** It said all
+/// three misses were *"polygons whose boundary touches itself"*. Re-measured against a freshly
+/// regenerated oracle at pin `945a9f4`:
+///
+/// - `single_row_macros_offset`'s ring has **8 vertices, all 8 distinct** — it does not touch
+///   itself anywhere. Ours starts at `(11400, 28000)`, which is what leftmost-then-lowest picks;
+///   the reference starts at `(49400, 140000)`, which is not leftmost. **Why is still underived** —
+///   but "self-touching" is not the reason, because it is not self-touching.
+/// - `cut_rows_min_step_top_left` and `endcap_corners` are **not measured by anything**.
+///   `tap_edge_order.py` runs only cases that call `tapcell`; those two call `cut_rows` and
+///   `place_endcaps`. The "45 of 48 rings" this comment used to quote came from a broader
+///   measurement nothing now reproduces — the instrument reports **30 of 32**, over 20 cases.
+///
+/// 🔑 **The one ring in the corpus that IS self-touching is `region1`'s, and the miss there is not
+/// a starting vertex at all** — see [`crate::endcaps`] notes on that case. Upstream walks 10 edges
+/// with `(166060, 149600)` visited twice; we walk the 4-edge bounding rectangle and miss the notch
+/// entirely. A shape difference, not a rotation.
+///
+/// ⚠️ The predecessor rule (lowest-then-leftmost) was wrong on more rings than this one, so this is
+/// strictly better rather than complete — **do not fit a further rule to the remainder.** Deriving
+/// the true start means reproducing `polygon_90_set_data::get_polygons`, which has not been done.
 fn rotate_to_lowest_left(edges: &[Edge]) -> Vec<Edge> {
     let Some(start) = (0..edges.len()).min_by_key(|&i| (edges[i].p0.x, edges[i].p0.y)) else {
         return edges.to_vec();

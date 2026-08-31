@@ -242,6 +242,17 @@ fn cut_rows(args: &[String]) -> ExitCode {
     if endcap_width == Some(0) {
         return ExitCode::from(2);
     }
+    // 🔑 CALL ORDER: `Tapcell::cutRows` opens with `checkPlaceable(endcap_master, "-endcap_master")`
+    // — before `findBlockages`, and before any row is touched. `cut_rows` only measures the endcap
+    // to size the row floor, but it refuses a master it could not later place.
+    if let Some(name) = cli.endcap_master.as_deref() {
+        if let Ok(m) = read_master(&db, name) {
+            if let Err(e) = check_placeable(&db, Some(&m), "-endcap_master") {
+                eprintln!("vyges-tap: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
 
     let default = default_distance(dbu);
     let halo_x = or_default(cli.halo_x.map(|v| to_dbu(v, dbu_f)), default);
@@ -427,6 +438,34 @@ fn max_core_cell_height(db: &Db) -> i32 {
 }
 
 /// Read a master's properties, or report why it cannot be used.
+/// **`Tapcell::checkPlaceable`** — a master that cannot sit in a core row is REFUSED, not placed.
+///
+/// Upstream rule: `TAP-36` is a **fatal error** whenever a master given for one of the cell
+/// options is not `isCoreAutoPlaceable()` — *"Master {} with class {} given for {} cannot be
+/// placed in core rows and would be ignored by detailed placement."*
+///
+/// ⛔ **Measured before this existed:** `place-endcaps --corner CORNER_TOPLEFT_LEGACY` (class
+/// `ENDCAP TOPLEFT`) reported `status: applied` with **4 endcaps** and exit 0, and
+/// `place-tapcells --master` the same with **10 tapcells** — cells detailed placement would then
+/// ignore, reported as a completed transformation. Upstream refuses all three commands.
+///
+/// 🔑 **The option name in the message is the CANONICAL one, not the user's spelling.** Upstream
+/// reports `-left_top_corner` for a master supplied via `-corner`, because the check runs on the
+/// resolved option struct. Invisible to every harness: `invalid_master_class` has an `.ok` and no
+/// `.defok`, so no golden diff reaches it.
+fn check_placeable(db: &Db, master: Option<&Master>, option: &str) -> Result<(), String> {
+    let Some(m) = master else { return Ok(()) };
+    if db.master_is_core_auto_placeable(&m.name) {
+        return Ok(());
+    }
+    let class = db.master_get_type(&m.name).unwrap_or_default();
+    Err(format!(
+        "master {} with class {} given for {} cannot be placed in core rows and would be \
+         ignored by detailed placement",
+        m.name, class, option
+    ))
+}
+
 fn read_master(db: &Db, name: &str) -> Result<Master, String> {
     let (w, h) = (
         db.master_get_width(name) as i32,
@@ -640,6 +679,12 @@ fn place_tapcells(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Upstream `placeTapcells(Options)` checks the master straight after the null test and before
+    // the distance default, and names the option `-master`.
+    if let Err(e) = check_placeable(&db, Some(&master), "-master") {
+        eprintln!("vyges-tap: {e}");
+        return ExitCode::from(2);
+    }
     let dist = match opts.get("distance") {
         Some(v) => match v.parse::<f64>() {
             Ok(um) => (um * dbu).round() as i32,
@@ -782,6 +827,40 @@ fn place_endcaps(args: &[String]) -> ExitCode {
         }
     };
 
+    // 🔑 CALL ORDER: upstream's `placeEndcaps` runs `checkPlaceable(options)` BEFORE
+    // `correctEndcapOptions`, so only what the CALLER named is checked — a master the library
+    // auto-selection supplies is deliberately not re-checked. Placing this after `autoselect`
+    // would check a different set.
+    let named: [(Option<&Master>, &str); 10] = [
+        (masters.left_top_corner.as_ref(), "-left_top_corner"),
+        (masters.right_top_corner.as_ref(), "-right_top_corner"),
+        (masters.left_bottom_corner.as_ref(), "-left_bottom_corner"),
+        (masters.right_bottom_corner.as_ref(), "-right_bottom_corner"),
+        (masters.left_top_edge.as_ref(), "-left_top_edge"),
+        (masters.right_top_edge.as_ref(), "-right_top_edge"),
+        (masters.left_bottom_edge.as_ref(), "-left_bottom_edge"),
+        (masters.right_bottom_edge.as_ref(), "-right_bottom_edge"),
+        (masters.left_edge.as_ref(), "-left_edge"),
+        (masters.right_edge.as_ref(), "-right_edge"),
+    ];
+    for (m, option) in named {
+        if let Err(e) = check_placeable(&db, m, option) {
+            eprintln!("vyges-tap: {e}");
+            return ExitCode::from(2);
+        }
+    }
+    for (list, option) in [
+        (&masters.top_edge, "-top_edge"),
+        (&masters.bottom_edge, "-bottom_edge"),
+    ] {
+        for m in list {
+            if let Err(e) = check_placeable(&db, Some(m), option) {
+                eprintln!("vyges-tap: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     // Anything the caller did not name is filled from the library's own master types. A library
     // that states nothing useful leaves those positions empty, and placement puts nothing there.
     let library = match db.masters_with_types() {
@@ -912,6 +991,31 @@ fn tapcell(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // 🔑 CALL ORDER: upstream's `run()` opens with `checkPlaceable(options)` over all twelve
+    // masters, BEFORE `cutRows`. Refusing here means a bad master never gets as far as cutting
+    // rows, so the database is not half-modified by a run that is going to fail anyway. The option
+    // names are upstream's Tcl spellings, which is what its message prints.
+    let all_twelve: [(Option<&Master>, &str); 12] = [
+        (flat.endcap_master.as_ref(), "-endcap_master"),
+        (tap_master.as_ref(), "-tapcell_master"),
+        (flat.cnrcap_nwin_master.as_ref(), "-cnrcap_nwin_master"),
+        (flat.cnrcap_nwout_master.as_ref(), "-cnrcap_nwout_master"),
+        (flat.tap_nwintie_master.as_ref(), "-tap_nwintie_master"),
+        (flat.tap_nwin2_master.as_ref(), "-tap_nwin2_master"),
+        (flat.tap_nwin3_master.as_ref(), "-tap_nwin3_master"),
+        (flat.tap_nwouttie_master.as_ref(), "-tap_nwouttie_master"),
+        (flat.tap_nwout2_master.as_ref(), "-tap_nwout2_master"),
+        (flat.tap_nwout3_master.as_ref(), "-tap_nwout3_master"),
+        (flat.incnrcap_nwin_master.as_ref(), "-incnrcap_nwin_master"),
+        (flat.incnrcap_nwout_master.as_ref(), "-incnrcap_nwout_master"),
+    ];
+    for (m, option) in all_twelve {
+        if let Err(e) = check_placeable(&db, m, option) {
+            eprintln!("vyges-tap: {e}");
+            return ExitCode::from(2);
+        }
+    }
 
     // ---- phase 1: cut the rows around placed macros ----
     let instances: Vec<Instance> = db

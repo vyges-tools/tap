@@ -1176,6 +1176,46 @@ mod orchestration_tests {
 /// spelling `ENDCAP_LEF58_…`, which is what it looks like in the source) — so a
 /// caller who names nothing can still be served, provided the library is typed. This is the
 /// mapping upstream's `correctEndcapOptions` uses.
+/// Which command is auto-selecting — upstream carries this as `EndcapCellOptions::tapcell_cmd`.
+///
+/// 🔑 **It exists only to name the right option in the ambiguity error, and that is not cosmetic.**
+/// `tapcell` and `place_endcaps` reach the same auto-selection through different flags, so the
+/// message has to name the flag of the command the user actually ran. Upstream threads a bool
+/// through the whole options struct for exactly this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    /// `place-endcaps`, whose options are the positions themselves.
+    PlaceEndcaps,
+    /// `tapcell`, whose options are the well-tie names.
+    Tapcell,
+}
+
+/// The option a caller would use to disambiguate `position`.
+///
+/// Upstream's mapping, from the ternaries in `correctEndcapOptions`: under `tapcell` the two side
+/// edges are `-endcap_master`, the corners are `-cnrcap_nw{out,in}_master` (out on top, in on
+/// bottom) and the inner edges are `-incnrcap_nw{in,out}_master` (in on top, out on bottom) — the
+/// same crossing `to_positions` applies. Under `place_endcaps` the position IS the option, and the
+/// side edges additionally accept the general `--endcap`.
+pub fn option_for(position: &str, caller: Caller) -> String {
+    if caller == Caller::Tapcell {
+        return match position {
+            "left_edge" | "right_edge" => "--endcap-master",
+            "right_top_corner" | "left_top_corner" => "--cnrcap-nwout-master",
+            "right_bottom_corner" | "left_bottom_corner" => "--cnrcap-nwin-master",
+            "right_top_edge" | "left_top_edge" => "--incnrcap-nwin-master",
+            "right_bottom_edge" | "left_bottom_edge" => "--incnrcap-nwout-master",
+            p => return format!("--{}", p.replace('_', "-")),
+        }
+        .to_string();
+    }
+    match position {
+        "left_edge" => "--left-edge / --endcap".to_string(),
+        "right_edge" => "--right-edge / --endcap".to_string(),
+        p => format!("--{}", p.replace('_', "-")),
+    }
+}
+
 pub const TYPE_FOR_POSITION: [(&str, &str); 12] = [
     ("left_edge", "ENDCAP LEFTEDGE"),
     ("right_edge", "ENDCAP RIGHTEDGE"),
@@ -1198,6 +1238,8 @@ pub enum AutoselectError {
     /// (upstream TAP-104).
     Ambiguous {
         position: String,
+        /// The option THIS caller would use — see [`option_for`].
+        option: String,
         ty: String,
         masters: Vec<String>,
     },
@@ -1207,13 +1249,13 @@ impl std::fmt::Display for AutoselectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AutoselectError::Ambiguous {
-                position,
+                option,
                 ty,
                 masters,
+                ..
             } => write!(
                 f,
-                "found multiple masters of type {ty}; name one with --{} : {}",
-                position.replace('_', "-"),
+                "found multiple masters of type {ty}; name one with {option} : {}",
                 masters.join(" ")
             ),
         }
@@ -1243,6 +1285,7 @@ fn of_type<'a>(library: &'a [(String, String)], ty: &str) -> Vec<&'a str> {
 pub fn autoselect(
     masters: &mut EndcapMasters,
     library: &[(String, String)],
+    caller: Caller,
     lookup: impl Fn(&str) -> Option<Master>,
 ) -> Result<(), AutoselectError> {
     // Pass 1: by type.
@@ -1265,6 +1308,7 @@ pub fn autoselect(
                 if found.len() > 1 {
                     return Err(AutoselectError::Ambiguous {
                         position: p.to_string(),
+                        option: option_for(p, caller),
                         ty: ty.to_string(),
                         masters: found.iter().map(|s| s.to_string()).collect(),
                     });
@@ -1396,7 +1440,7 @@ mod autoselect_tests {
     fn a_typed_library_fills_every_position_from_nothing() {
         // The case the whole function exists for: the caller names no masters at all.
         let mut m = EndcapMasters::default();
-        autoselect(&mut m, &lib(), look).expect("unambiguous");
+        autoselect(&mut m, &lib(), Caller::PlaceEndcaps, look).expect("unambiguous");
         assert_eq!(m.left_bottom_corner.map(|x| x.name).as_deref(), Some("LBC"));
         assert_eq!(m.right_top_corner.map(|x| x.name).as_deref(), Some("RTC"));
         assert_eq!(m.left_edge.map(|x| x.name).as_deref(), Some("LE"));
@@ -1428,7 +1472,7 @@ mod autoselect_tests {
             top_edge: vec![look("MINE_TOP").unwrap()],
             ..Default::default()
         };
-        autoselect(&mut m, &lib(), look).expect("unambiguous");
+        autoselect(&mut m, &lib(), Caller::PlaceEndcaps, look).expect("unambiguous");
         assert_eq!(
             m.left_bottom_corner.map(|x| x.name).as_deref(),
             Some("MINE")
@@ -1444,7 +1488,7 @@ mod autoselect_tests {
         let mut library = lib();
         library.push(("LBC2".into(), "ENDCAP LEFTBOTTOMCORNER".into()));
         let mut m = EndcapMasters::default();
-        let err = autoselect(&mut m, &library, look).expect_err("ambiguous");
+        let err = autoselect(&mut m, &library, Caller::PlaceEndcaps, look).expect_err("ambiguous");
         let AutoselectError::Ambiguous {
             position, masters, ..
         } = &err;
@@ -1457,12 +1501,47 @@ mod autoselect_tests {
     }
 
     #[test]
+    fn the_ambiguity_names_the_option_of_the_command_that_was_run() {
+        // Upstream rule: `correctEndcapOptions` picks the option name in TAP-104 from
+        // `options.tapcell_cmd`, so the same ambiguity reads `-cnrcap_nwin_master` under `tapcell`
+        // and `-left_bottom_corner` under `place_endcaps`. Naming the wrong one is not cosmetic:
+        // `--left-bottom-corner` is not an option of `tapcell`, so the advice cannot be followed.
+        let mut library = lib();
+        library.push(("LBC2".into(), "ENDCAP LEFTBOTTOMCORNER".into()));
+
+        let mut m = EndcapMasters::default();
+        let e = autoselect(&mut m, &library, Caller::PlaceEndcaps, look).expect_err("ambiguous");
+        assert!(e.to_string().contains("--left-bottom-corner"), "{e}");
+
+        let mut m = EndcapMasters::default();
+        let e = autoselect(&mut m, &library, Caller::Tapcell, look).expect_err("ambiguous");
+        assert!(e.to_string().contains("--cnrcap-nwin-master"), "{e}");
+        assert!(
+            !e.to_string().contains("--left-bottom-corner"),
+            "tapcell has no such option: {e}"
+        );
+    }
+
+    #[test]
+    fn the_tapcell_option_names_keep_the_corner_crossing() {
+        // The same crossing `to_positions` applies: nwout on top, nwin on bottom for corners, and
+        // the opposite for inner edges. Getting it backwards here sends the user to the flag that
+        // fills the OTHER half of the design.
+        use super::{option_for, Caller::Tapcell as T};
+        assert_eq!(option_for("left_top_corner", T), "--cnrcap-nwout-master");
+        assert_eq!(option_for("left_bottom_corner", T), "--cnrcap-nwin-master");
+        assert_eq!(option_for("left_top_edge", T), "--incnrcap-nwin-master");
+        assert_eq!(option_for("left_bottom_edge", T), "--incnrcap-nwout-master");
+        assert_eq!(option_for("left_edge", T), "--endcap-master");
+    }
+
+    #[test]
     fn several_horizontal_masters_are_a_richer_choice_rather_than_an_ambiguity() {
         // The fill picks between widths per span, so more than one is useful, not confusing.
         let mut library = lib();
         library.push(("TE2".into(), "ENDCAP TOPEDGE".into()));
         let mut m = EndcapMasters::default();
-        autoselect(&mut m, &library, look).expect("not ambiguous");
+        autoselect(&mut m, &library, Caller::PlaceEndcaps, look).expect("not ambiguous");
         assert_eq!(m.top_edge.len(), 2);
     }
 
@@ -1477,7 +1556,7 @@ mod autoselect_tests {
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
         let mut m = EndcapMasters::default();
-        autoselect(&mut m, &library, look).expect("unambiguous");
+        autoselect(&mut m, &library, Caller::PlaceEndcaps, look).expect("unambiguous");
         assert_eq!(
             m.left_top_corner.map(|x| x.name).as_deref(),
             Some("LBC"),
@@ -1501,7 +1580,7 @@ mod autoselect_tests {
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
         let mut m = EndcapMasters::default();
-        autoselect(&mut m, &library, look).expect("unambiguous");
+        autoselect(&mut m, &library, Caller::PlaceEndcaps, look).expect("unambiguous");
         assert_eq!(
             m.right_bottom_corner.map(|x| x.name).as_deref(),
             Some("LBC"),
@@ -1529,7 +1608,7 @@ mod autoselect_tests {
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect();
         let mut m = EndcapMasters::default();
-        autoselect(&mut m, &library, look).expect("no ambiguity, just nothing to find");
+        autoselect(&mut m, &library, Caller::PlaceEndcaps, look).expect("no ambiguity, just nothing to find");
         assert_eq!(
             m,
             EndcapMasters::default(),

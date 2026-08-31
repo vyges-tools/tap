@@ -870,7 +870,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(e) = endcaps::autoselect(&mut masters, &library, |n| read_master(&db, n).ok()) {
+    if let Err(e) = endcaps::autoselect(&mut masters, &library, endcaps::Caller::PlaceEndcaps, |n| read_master(&db, n).ok()) {
         eprintln!("vyges-tap: {e}");
         return ExitCode::from(2);
     }
@@ -1057,7 +1057,7 @@ fn tapcell(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(e) = endcaps::autoselect(&mut masters, &library, |n| read_master(&db, n).ok()) {
+    if let Err(e) = endcaps::autoselect(&mut masters, &library, endcaps::Caller::Tapcell, |n| read_master(&db, n).ok()) {
         eprintln!("vyges-tap: {e}");
         return ExitCode::from(2);
     }

@@ -731,10 +731,24 @@ fn place_tapcells(args: &[String]) -> ExitCode {
     let mut idx = 0usize;
     let mut planned = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
+        // Upstream queries its R-tree with the row bbox BLOATED BY -1 — shrunk a unit on every
+        // side — and intersects in both axes:
+        //     row_bb.bloat(-1, query_box);
+        //     row_insts(fixed_instances.qbegin(intersects(query_box)), ...)
+        // ⚠️ The x bound is part of it. Filtering on y alone admits a fixed cell that sits beyond
+        // the row's ends in the same band, and the one-site-gap widening can then reach it, so a
+        // tap gets nudged away from an obstacle upstream never considered. The -1 is what stops a
+        // cell that merely ABUTS the row counting as being in it.
+        let q = boundary::Rect::new(
+            row.bbox.x0 + 1,
+            row.bbox.y0 + 1,
+            row.bbox.x1 - 1,
+            row.bbox.y1 - 1,
+        );
         let in_row: Vec<boundary::Rect> = fixed
             .iter()
             .map(|(r, _)| *r)
-            .filter(|r| r.y1 > row.bbox.y0 && r.y0 < row.bbox.y1)
+            .filter(|r| r.x1 > q.x0 && r.x0 < q.x1 && r.y1 > q.y0 && r.y0 < q.y1)
             .collect();
         planned.extend(tapcells::place_in_row(
             row,
@@ -1101,10 +1115,18 @@ fn tapcell(args: &[String]) -> ExitCode {
         let disallow_gaps = !db.has_one_site_master();
         let prefix = opts.get("tap-prefix").unwrap_or("TAP_");
         for (ri, row) in rows.iter().enumerate() {
+            // Same query box as `place-tapcells` — the row bbox shrunk a unit on every side, in
+            // BOTH axes. See the note there.
+            let q = boundary::Rect::new(
+                row.bbox.x0 + 1,
+                row.bbox.y0 + 1,
+                row.bbox.x1 - 1,
+                row.bbox.y1 - 1,
+            );
             let in_row: Vec<boundary::Rect> = obstacles
                 .iter()
                 .copied()
-                .filter(|r| r.y1 > row.bbox.y0 && r.y0 < row.bbox.y1)
+                .filter(|r| r.x1 > q.x0 && r.x0 < q.x1 && r.y1 > q.y0 && r.y0 < q.y1)
                 .collect();
             tap_cells.extend(tapcells::place_in_row(
                 row,

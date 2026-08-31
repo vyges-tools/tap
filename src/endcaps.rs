@@ -211,6 +211,37 @@ pub fn place_corner(
 ///
 /// `corner_cells` are the corner cells already placed in this row: where one covers an end of the
 /// edge, the fill starts (or stops) at its far side instead of overlapping it.
+/// Upstream `computeOpenSpans` — subtract the blocker intervals from `[start, end)` and return the
+/// gaps left open, in order.
+///
+/// 🔑 **This is why a horizontal edge is not filled straight through.** `placeEndcapEdgeHorizontal`
+/// carves out every span the row already holds — corners and earlier edge cells alike — and fills
+/// each remaining gap independently. Shrinking only where an occupant is flush with an END leaves
+/// anything mid-span to be filled over, and a corner lands mid-span at any concave junction
+/// part-way along a boundary.
+fn open_spans(start: i32, end: i32, mut blockers: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    blockers.sort_unstable();
+    let mut out = Vec::new();
+    let mut cursor = start;
+    for (b0, b1) in blockers {
+        // sorted by start, so nothing after this can open a span
+        if b0 >= end {
+            break;
+        }
+        if b1 <= cursor {
+            continue;
+        }
+        if b0 > cursor {
+            out.push((cursor, b0));
+        }
+        cursor = b1;
+    }
+    if cursor < end {
+        out.push((cursor, end));
+    }
+    out
+}
+
 pub fn place_edge_horizontal(
     edge: &Edge,
     row: &Row,
@@ -242,56 +273,65 @@ pub fn place_edge_horizontal(
     }
 
     let mut out = Vec::new();
-    let mut x = x0;
-    while x < x1 {
-        let remaining = x1 - x;
-        // Upstream `fillEndcapEdge::pick_next_master`: walk the width-sorted list, SKIPPING any
-        // master that cannot legally sit in this row's orientation, and take the first — widest —
-        // whose width divides the REMAINING span exactly. If none does, take the last one still
-        // standing, which is the narrowest that PASSED symmetry.
-        //
-        // ⛔ **The symmetry test belongs inside this walk.** Choosing first and testing afterwards
-        // rejects a master upstream would simply have skipped over, and falls back to one upstream
-        // would never have considered. `checkSymmetry` is false for any MX row whose master lacks
-        // X symmetry, and rows alternate R0/MX, so this is ordinary rather than exotic.
-        //
-        // ⚠️ The comment here previously justified the old order by saying upstream `continue`s
-        // "without advancing, which cannot terminate". It does not: that `continue` is inside the
-        // master-selection loop and advances to the next master. The rationale was a misreading.
-        let mut fallback: Option<&Master> = None;
-        let mut chosen: Option<&Master> = None;
-        for &m in choices.iter() {
-            if !check_symmetry(m.symmetry_x, m.symmetry_y, &row.orient) {
-                continue;
+    // Upstream fills ONE OPEN SPAN AT A TIME: `computeOpenSpans(e0.x, e1.x, occupiedSpans(row))`,
+    // then `fillEndcapEdge` per span. `x_end` below is the span's end, not the edge's.
+    for (span_start, span_end) in open_spans(
+        x0,
+        x1,
+        corner_cells.iter().map(|c| (c.x0, c.x1)).collect(),
+    ) {
+        let x1 = span_end;
+        let mut x = span_start;
+        while x < x1 {
+            let remaining = x1 - x;
+            // Upstream `fillEndcapEdge::pick_next_master`: walk the width-sorted list, SKIPPING any
+            // master that cannot legally sit in this row's orientation, and take the first — widest —
+            // whose width divides the REMAINING span exactly. If none does, take the last one still
+            // standing, which is the narrowest that PASSED symmetry.
+            //
+            // ⛔ **The symmetry test belongs inside this walk.** Choosing first and testing afterwards
+            // rejects a master upstream would simply have skipped over, and falls back to one upstream
+            // would never have considered. `checkSymmetry` is false for any MX row whose master lacks
+            // X symmetry, and rows alternate R0/MX, so this is ordinary rather than exotic.
+            //
+            // ⚠️ The comment here previously justified the old order by saying upstream `continue`s
+            // "without advancing, which cannot terminate". It does not: that `continue` is inside the
+            // master-selection loop and advances to the next master. The rationale was a misreading.
+            let mut fallback: Option<&Master> = None;
+            let mut chosen: Option<&Master> = None;
+            for &m in choices.iter() {
+                if !check_symmetry(m.symmetry_x, m.symmetry_y, &row.orient) {
+                    continue;
+                }
+                fallback = Some(m);
+                if remaining % m.width == 0 {
+                    chosen = Some(m);
+                    break;
+                }
             }
-            fallback = Some(m);
-            if remaining % m.width == 0 {
-                chosen = Some(m);
+            let Some(master) = chosen.or(fallback) else {
+                // No master in this list can legally sit in this row. Upstream reaches TAP-20 here.
+                break;
+            };
+            if x + master.width > x1 {
+                // Upstream raises TAP-20 and aborts the run. Here the caller decides what an
+                // unfillable boundary means, so the fill stops and reports what it managed.
                 break;
             }
-        }
-        let Some(master) = chosen.or(fallback) else {
-            // No master in this list can legally sit in this row. Upstream reaches TAP-20 here.
-            break;
-        };
-        if x + master.width > x1 {
-            // Upstream raises TAP-20 and aborts the run. Here the caller decides what an
-            // unfillable boundary means, so the fill stops and reports what it managed.
-            break;
-        }
 
-        out.push(Placement {
-            name: format!(
-                "{}EDGE_{}_{:?}_{}",
-                masters.prefix, row.name, edge.kind, phy_index
-            ),
-            master: master.name.clone(),
-            x,
-            y: row.bbox.y0,
-            orient: row.orient.clone(),
-        });
-        *phy_index += 1;
-        x += master.width;
+            out.push(Placement {
+                name: format!(
+                    "{}EDGE_{}_{:?}_{}",
+                    masters.prefix, row.name, edge.kind, phy_index
+                ),
+                master: master.name.clone(),
+                x,
+                y: row.bbox.y0,
+                orient: row.orient.clone(),
+            });
+            *phy_index += 1;
+            x += master.width;
+        }
     }
     out
 }
@@ -571,6 +611,49 @@ mod tests {
         assert_eq!(out.len(), 2, "80 divides by the 40-wide master");
         assert!(out.iter().all(|p| p.master == "BE4"));
         assert_eq!(out.iter().map(|p| p.x).collect::<Vec<_>>(), vec![0, 40]);
+    }
+
+    #[test]
+    fn a_cell_in_the_middle_of_the_span_splits_the_fill_rather_than_being_filled_over() {
+        // Upstream `placeEndcapEdgeHorizontal` does NOT fill [e0, e1] straight through. It
+        // subtracts every occupied span in the row -- corners AND earlier edge cells -- and calls
+        // fillEndcapEdge once per remaining OPEN span:
+        //
+        //   for (span_start, span_end) : computeOpenSpans(e0.x, e1.x, occupiedSpans(row))
+        //       fillEndcapEdge(row, span_start, span_end, ...)
+        //
+        // Shrinking only where an occupant is flush with an END misses anything in the middle,
+        // which is then filled over. A corner lands mid-span at any concave junction part-way
+        // along a boundary.
+        let mut ms = masters();
+        ms.bottom_edge = vec![Master { symmetry_x: true, ..m("BE", 20, 10) }];
+        let e = Edge {
+            kind: EdgeType::Bottom,
+            p0: Point::new(0, 0),
+            p1: Point::new(100, 0),
+        };
+        let blocker = Rect::new(40, 0, 60, 10);
+        let mut idx = 0;
+        let out = place_edge_horizontal(
+            &e,
+            &row("ROW_0", "R0", 0, 100, 0),
+            &[blocker],
+            &ms,
+            &mut idx,
+        );
+        for p in &out {
+            let cell = Rect::new(p.x, p.y, p.x + 20, p.y + 10);
+            assert!(
+                !rects_overlap(cell, blocker),
+                "filled over the occupied span at x={}: {out:?}",
+                p.x
+            );
+        }
+        assert_eq!(
+            out.iter().map(|p| p.x).collect::<Vec<_>>(),
+            vec![0, 20, 60, 80],
+            "two open spans, filled independently"
+        );
     }
 
     #[test]

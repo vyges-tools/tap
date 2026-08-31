@@ -96,6 +96,11 @@ fn delta(from: Point, to: Point) -> (i32, i32) {
 /// checks the two agree.
 pub fn classify_edges(outline: &[Point]) -> Vec<Edge> {
     let n = outline.len();
+    // ⚠️ A guard the reference does not have. It builds edges from whatever points it is handed and
+    // reads `edges[size - 1]` for the first one's predecessor, so an outline with fewer than four
+    // points classifies turns that are not turns. No rectilinear ring can have fewer than four, so
+    // upstream's callers make this unreachable; returning nothing is the defined answer rather than
+    // a classification of nonsense. Same guard in `classify_corners`.
     if n < 4 {
         return Vec::new();
     }

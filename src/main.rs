@@ -91,7 +91,8 @@ const DESCRIBE: &str = r#"{
       "The `boundary` verb is INSPECT-ONLY: it reports the row-region, edge and corner classification and writes nothing. Every other verb that places (`place-endcaps`, `place-tapcells`, `tapcell`) does mutate the design -- they create physical instances, orient, locate, lock and mark them -- as does `cut-rows`, and `ripup` removes them. This line previously read \"NOTHING IS PLACED from it yet, ONLY cut-rows mutates\", which was true of an early build and stayed here after placement shipped and was measured exact; it is corrected rather than deleted because a reader who saw the old text needs to know it moved, not wonder which of two claims to believe.",
       "Unnamed endcap positions are filled from the library's own LEF58 master types (odb reports these as space-separated strings like \"ENDCAP LEFTBOTTOMCORNER\", not the enum spelling). Two masters claiming one position is an ERROR naming both, not a coin flip: a wrong endcap is a well-tie fault nobody sees until silicon. A position nothing fills stays empty and places nothing.",
       "Taps and endcaps use DIFFERENT default name prefixes -- TAP_ and PHY_ -- because they are separate namespaces that can be ripped up independently.",
-      "MEASURED 2026-08-23 against the upstream goldens at pin @OPENROAD_PIN@: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), and endcap placement 9 of 9 exact -- every physical cell matching the golden in master, position and orientation.",
+      "MEASURED 2026-09-03 against the upstream goldens at pin 7d490b8ecd357199c0c0e9f3e32becd5eb507c34: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), endcap placement 9 of 9 exact, and combined tapcell 20 of 20 -- every physical cell matching the golden in master, position and orientation. Unchanged from the previous pin 945a9f48dc6e5cc91d865daa92c45a1094cb682c. The pin is spelled out rather than substituted: a MEASUREMENT names the commit it was taken at, not whatever this binary was later built against.",
+      "NOT scored: upstream added `cut_rows_short_core` at 7d490b8ecd357199c0c0e9f3e32becd5eb507c34 and it is SKIPPED -- it needs `-row_min_height`, the `min_row_height` parameter `odb::cutRows` gained at the previous pin and which this engine passes as 0. Upstream now ships a test for it, so the deferred question of whether tap should USE it has a witness.",
       "status is one of applied, planned, vacuous or error. VACUOUS IS NOT APPLIED: it means the run changed nothing -- no row cut, no cell inserted, none removed -- and the declared assertion passes only on applied, so a no-op fails it rather than reporting a transformation that did not happen. Zero may still be the right answer for the design; read the count and decide. A dry run reports planned, which never claimed to have applied anything.",
       "All five commands are implemented: cut-rows, place-endcaps, place-tapcells, the combined tapcell, and ripup. Rip-up matches by NAME PREFIX, which is the only mark these cells carry -- they are physical-only instances with no nets. An EMPTY prefix removes nothing rather than everything, which is the difference between undoing a tap step and destroying the design.",
       "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin @OPENROAD_PIN@ and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
@@ -1328,15 +1329,49 @@ mod pin_tests {
         assert_eq!(super::CRATE_PIN.len(), 40, "a full commit SHA, not an abbreviation");
     }
 
-    /// ⛔ The whole point of inheriting the pin is that no engine carries one of its own.
+    /// ⛔ The `openroad_pin` FIELD must never be a literal — that is what `--pins` reads.
+    ///
+    /// ⚠️ **It guards the FIELD, not the prose.** The earlier version rejected any 40-hex token
+    /// ANYWHERE, which forbids the one thing a correlation claim must do: **name the commit it was
+    /// MEASURED at**. Under that rule `"MEASURED 2026-08-23 ... at pin @OPENROAD_PIN@"` was the
+    /// only legal spelling, and the token then re-asserts a fixed date's measurement at every
+    /// future pin. `tap` is the case that shows why it is dangerous rather than merely wrong: the
+    /// numbers HELD across the 2026-09-03 re-pin, so nothing complained, and the claim would have
+    /// gone on being auto-renewed until the pin it silently stopped being true at.
+    ///
+    /// 🔑 **The pin a binary was BUILT against and the pin a score was MEASURED at are different
+    /// facts.** The first is inherited; the second is written down and left alone.
     #[test]
-    fn no_sha_is_hardcoded_anywhere_in_the_descriptor() {
-        let raw = super::DESCRIBE;
-        for tok in raw.split(|c: char| !c.is_ascii_hexdigit()) {
+    fn the_openroad_pin_field_is_the_token_not_a_literal() {
+        let raw: serde_json::Value = serde_json::from_str(super::DESCRIBE)
+            .expect("the raw descriptor is valid JSON before substitution");
+        assert_eq!(
+            raw["openroad_pin"], PIN_TOKEN,
+            "openroad_pin must be {PIN_TOKEN} in the source so it tracks the build"
+        );
+    }
+
+    /// Every `MEASURED` claim must name a full commit, and must NOT use the token.
+    #[test]
+    fn every_measured_claim_names_the_commit_it_was_taken_at() {
+        let raw: serde_json::Value =
+            serde_json::from_str(super::DESCRIBE).expect("valid JSON");
+        let mut seen = 0;
+        for lim in raw["provenance_limitations"].as_array().expect("an array") {
+            let t = lim.as_str().unwrap();
+            if !t.starts_with("MEASURED") {
+                continue;
+            }
+            seen += 1;
             assert!(
-                tok.len() < 40,
-                "{tok} looks like a hardcoded commit -- use the {PIN_TOKEN} placeholder"
+                t.split(|c: char| !c.is_ascii_hexdigit()).any(|tok| tok.len() == 40),
+                "a MEASURED claim must name its commit: {t}"
+            );
+            assert!(
+                !t.contains(PIN_TOKEN),
+                "a MEASURED claim must not use {PIN_TOKEN} -- it would follow the build: {t}"
             );
         }
+        assert!(seen > 0, "the descriptor should carry at least one MEASURED claim");
     }
 }

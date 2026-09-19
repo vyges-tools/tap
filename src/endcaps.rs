@@ -263,6 +263,17 @@ pub fn place_edge_horizontal(
     choices.sort_by(|a, b| b.width.cmp(&a.width));
 
     let (mut x0, mut x1) = edge.x_span();
+    // ⛔ **Clip to THIS row's extent.** Upstream:
+    //     x_start = max(edge_min, row_bbox.xMin());
+    //     x_end   = min(edge_max, row_bbox.xMax());
+    //     if (x_start >= x_end) continue;
+    // A FRAGMENTED row covers only part of the edge, so a fill that used the whole edge span
+    // would run past the fragment it belongs to and into its neighbour's.
+    x0 = x0.max(row.bbox.x0);
+    x1 = x1.min(row.bbox.x1);
+    if x0 >= x1 {
+        return Vec::new();
+    }
     for c in corner_cells {
         if c.x0 == x0 {
             x0 = c.x1;
@@ -596,6 +607,75 @@ mod tests {
         )
         .is_none());
         assert_eq!(idx, 0, "and nothing was numbered");
+    }
+
+    #[test]
+    fn a_horizontal_edge_is_clipped_to_the_row_fragment_it_is_filling() {
+        // ⛔ **Upstream clips each fill to THAT row's extent** — `placeEndcapEdgeHorizontal`:
+        //
+        //     x_start = std::max(edge_min, row_bbox.xMin());
+        //     x_end   = std::min(edge_max, row_bbox.xMax());
+        //     if (x_start >= x_end) { continue; }
+        //
+        // A FRAGMENTED row covers only part of the edge. Filling the whole edge span in each
+        // fragment runs past the fragment and into its neighbour's territory.
+        let ms = masters();
+        let mut idx = 0;
+        let e = Edge {
+            kind: EdgeType::Bottom,
+            p0: Point::new(0, 0),
+            p1: Point::new(80, 0),
+        };
+        // The row covers only [0, 40) of an edge that runs [0, 80).
+        let out = place_edge_horizontal(&e, &row("FRAG", "R0", 0, 40, 0), &[], &ms, &mut idx);
+        assert_eq!(out.len(), 1, "only the fragment's own 40 wide span is filled");
+        assert_eq!(out[0].x, 0);
+        assert!(out.iter().all(|p| p.x + 40 <= 40), "nothing past the fragment");
+    }
+
+    #[test]
+    fn touching_row_fragments_each_get_the_master_for_their_OWN_orientation() {
+        // 🔑 **The rule, from upstream's own case `endcap_row_fragments`:** *"Fill both
+        // horizontal boundaries across touching row fragments, selecting the edge master and
+        // orientation SEPARATELY FOR EACH FRAGMENT."*
+        //
+        // `placeEndcapEdgeHorizontal` picks the master list INSIDE its per-row loop:
+        //
+        //     for (odb::dbRow* row : rows) {
+        //       const std::vector<odb::dbMaster*>& masters
+        //           = row->getOrient() == odb::dbOrientType::R0 ? r0_masters : flipped_masters;
+        //
+        // with `r0_masters = is_top ? top_edge : bottom_edge` and `flipped_masters` the other
+        // way round, because *"the top-edge masters serve a top edge in an R0 row and a bottom
+        // edge in a flipped row, and vice versa."*
+        //
+        // ⛔ This engine used to fill only `rows_on_edge(..).next()` — one fragment — on the
+        // claim that *"a horizontal segment lies along a single row by definition."* It does
+        // not, and the consequence was a cell in the wrong row carrying the MIRROR master:
+        // `ENDCAP_X1_BOTTOMEDGE`/`FS` where the golden has `ENDCAP_X1_TOPEDGE`/`N` at identical
+        // coordinates.
+        let ms = masters();
+        let e = Edge {
+            kind: EdgeType::Bottom,
+            p0: Point::new(0, 0),
+            p1: Point::new(80, 0),
+        };
+        // Two touching fragments of one boundary, at the same y, with OPPOSITE orientations.
+        let upright = row("FRAG_R0", "R0", 0, 40, 0);
+        let flipped = row("FRAG_MX", "MX", 40, 80, 0);
+
+        let mut idx = 0;
+        let a = place_edge_horizontal(&e, &upright, &[], &ms, &mut idx);
+        let b = place_edge_horizontal(&e, &flipped, &[], &ms, &mut idx);
+
+        assert_eq!(a.len(), 1, "the R0 fragment fills its own span");
+        assert_eq!(b.len(), 1, "and so does the flipped one");
+        // A Bottom edge in an R0 row takes a BOTTOM-edge master...
+        assert_eq!(a[0].master, "BE4");
+        // ...and the SAME Bottom edge in a flipped row takes a TOP-edge master.
+        assert_eq!(b[0].master, "TE4", "the flipped fragment must not reuse the R0 choice");
+        assert_eq!(a[0].x, 0);
+        assert_eq!(b[0].x, 40);
     }
 
     #[test]
@@ -1087,14 +1167,44 @@ pub fn place_all(
                         let Some(site) = masters.horizontal_site() else {
                             continue;
                         };
-                        // A horizontal segment lies along a single row by definition.
-                        let Some(row) = rows_on_edge(e, rows, site).into_iter().next() else {
-                            continue;
-                        };
-                        let cs = occupancy_of(&placed_corners, &edge_spans, &row.name);
-                        let placed = place_edge_horizontal(e, row, &cs, masters, phy_index);
-                        note_edges(&mut edge_spans, &row.name, &placed, masters);
-                        out.extend(placed);
+                        // ⛔ **EVERY row on the edge, not the first.** This took only
+                        // `rows_on_edge(..).next()`, justified by the comment *"a horizontal
+                        // segment lies along a single row by definition"*. That invariant is
+                        // false: a horizontal edge can run along several TOUCHING ROW FRAGMENTS
+                        // at the same y, and upstream's own case is named for it —
+                        // `endcap_row_fragments`, *"Fill both horizontal boundaries across
+                        // touching row fragments, selecting the edge master and orientation
+                        // separately for each fragment."*
+                        //
+                        // 🔑 Separately per fragment MATTERS because the master follows the
+                        // ROW's orientation, not the edge's: upstream picks
+                        // `row->getOrient() == R0 ? r0_masters : flipped_masters` INSIDE its
+                        // per-row loop (`tapcell.cpp`, `placeEndcapEdgeHorizontal`). Filling
+                        // only the first fragment put cells in the wrong row with the mirror
+                        // master — `ENDCAP_X1_BOTTOMEDGE`/`FS` where the golden has
+                        // `ENDCAP_X1_TOPEDGE`/`N` at identical coordinates.
+                        //
+                        // ⚠️ The vertical arm below already loops; this arm was the odd one out.
+                        let edge_rows = rows_on_edge(e, rows, site);
+                        // Upstream seeds its `edge_blocked` from the occupied spans of EVERY row
+                        // on the edge BEFORE filling any of them, then appends each span it
+                        // fills — so overlapping fragments at one height neither fill twice nor
+                        // cover each other's corners.
+                        let mut blocked: Vec<Rect> = Vec::new();
+                        for row in &edge_rows {
+                            blocked.extend(occupancy_of(&placed_corners, &edge_spans, &row.name));
+                        }
+                        for row in edge_rows {
+                            let placed =
+                                place_edge_horizontal(e, row, &blocked, masters, phy_index);
+                            note_edges(&mut edge_spans, &row.name, &placed, masters);
+                            for pl in &placed {
+                                if let Some((w, h)) = masters.extent_of(&pl.master) {
+                                    blocked.push(Rect::new(pl.x, pl.y, pl.x + w, pl.y + h));
+                                }
+                            }
+                            out.extend(placed);
+                        }
                     }
                     EdgeType::Left | EdgeType::Right => {
                         let master = match e.kind {
@@ -1181,6 +1291,46 @@ mod orchestration_tests {
     fn classify(rows: &[Row], core: BRect) -> Vec<boundary::ClassifiedPolygon> {
         let region = boundary::row_region(core, &rows.iter().map(|r| r.bbox).collect::<Vec<_>>());
         boundary::classify(&region)
+    }
+
+    #[test]
+    fn every_row_fragment_under_one_horizontal_edge_is_filled_not_just_the_first() {
+        // ⛔ **This is the defect the `tap` gate caught at pin `da9f29f1`**, and it is a CALLER
+        // bug, not a rule bug: `place_all` took `rows_on_edge(..).next()` for a horizontal edge,
+        // on the claim that *"a horizontal segment lies along a single row by definition."*
+        //
+        // Upstream loops (`placeEndcapEdgeHorizontal`):
+        //     for (odb::dbRow* row : rows) { ... fillEndcapEdge(row, ...); }
+        // and its own case is named for it — `endcap_row_fragments`, *"Fill both horizontal
+        // boundaries across touching row fragments."*
+        //
+        // ⚠️ The per-row MASTER rule was already right; only the first fragment was ever
+        // reached. So a unit test on `place_edge_horizontal` alone cannot see this — it has to
+        // go through `place_all`.
+        let ms_ = ms();
+        // One boundary row split into two TOUCHING fragments, side by side at the same y.
+        let rs = vec![
+            Row { name: "FRAG_L".into(), site: "core".into(), orient: "R0".into(),
+                  bbox: Rect::new(0, 0, 40, 10), site_width: 10 },
+            Row { name: "FRAG_R".into(), site: "core".into(), orient: "R0".into(),
+                  bbox: Rect::new(40, 0, 80, 10), site_width: 10 },
+            Row { name: "ROW_1".into(), site: "core".into(), orient: "MX".into(),
+                  bbox: Rect::new(0, 10, 80, 20), site_width: 10 },
+        ];
+        let c = classify(&rs, BRect::new(0, 0, 80, 20));
+        let mut idx = 0;
+        let out = place_all(&c, &rs, &ms_, &mut idx);
+
+        // ⚠️ Count EDGE masters only. A first version of this assertion counted every cell at
+        // y == 0 and passed with the bug still in, because the right-bottom CORNER sits at
+        // x >= 40 and satisfied it — a test that could not fail.
+        let edge_fill = |p: &&Placement| {
+            p.y == 0 && (p.master.starts_with("BE") || p.master.starts_with("TE"))
+        };
+        let left = out.iter().filter(|p| edge_fill(p) && p.x < 40).count();
+        let right = out.iter().filter(|p| edge_fill(p) && p.x >= 40).count();
+        assert!(left > 0, "the first fragment is edge-filled");
+        assert!(right > 0, "and so is the SECOND — this is what regressed");
     }
 
     #[test]

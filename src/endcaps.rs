@@ -242,25 +242,35 @@ fn open_spans(start: i32, end: i32, mut blockers: Vec<(i32, i32)>) -> Vec<(i32, 
     out
 }
 
+/// A top or bottom boundary span no master can fill without a gap (upstream TAP-0020, which stops
+/// the command): the edge, the row, and where the fill stood and had to reach, in DBU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unfillable {
+    pub edge: EdgeType,
+    pub row: String,
+    pub x: i32,
+    pub x_end: i32,
+}
+
 pub fn place_edge_horizontal(
     edge: &Edge,
     row: &Row,
     corner_cells: &[Rect],
     masters: &EndcapMasters,
     phy_index: &mut usize,
-) -> Vec<Placement> {
+) -> Result<Vec<Placement>, Unfillable> {
     let upright = row.orient == "R0";
     let mut choices: Vec<&Master> = match (edge.kind, upright) {
         (EdgeType::Top, true) | (EdgeType::Bottom, false) => masters.top_edge.iter().collect(),
         (EdgeType::Bottom, true) | (EdgeType::Top, false) => masters.bottom_edge.iter().collect(),
-        _ => return Vec::new(),
+        _ => return Ok(Vec::new()),
     };
     choices.retain(|m| m.width > 0);
     if choices.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // Widest first: the fill prefers the largest cell that divides the remaining span.
-    choices.sort_by(|a, b| b.width.cmp(&a.width));
+    choices.sort_by_key(|m| std::cmp::Reverse(m.width));
 
     let (mut x0, mut x1) = edge.x_span();
     // ⛔ **Clip to THIS row's extent.** Upstream:
@@ -272,7 +282,7 @@ pub fn place_edge_horizontal(
     x0 = x0.max(row.bbox.x0);
     x1 = x1.min(row.bbox.x1);
     if x0 >= x1 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     for c in corner_cells {
         if c.x0 == x0 {
@@ -320,15 +330,11 @@ pub fn place_edge_horizontal(
                     break;
                 }
             }
-            let Some(master) = chosen.or(fallback) else {
-                // No master in this list can legally sit in this row. Upstream reaches TAP-20 here.
-                break;
+            // Rule (fillEndcapEdge): no symmetric master, or none that fits what is left, cannot be
+            // filled without a gap — TAP-0020, which stops the whole command.
+            let Some(master) = chosen.or(fallback).filter(|m| x + m.width <= x1) else {
+                return Err(Unfillable { edge: edge.kind, row: row.name.clone(), x, x_end: x1 });
             };
-            if x + master.width > x1 {
-                // Upstream raises TAP-20 and aborts the run. Here the caller decides what an
-                // unfillable boundary means, so the fill stops and reports what it managed.
-                break;
-            }
 
             out.push(Placement {
                 name: format!(
@@ -344,7 +350,7 @@ pub fn place_edge_horizontal(
             x += master.width;
         }
     }
-    out
+    Ok(out)
 }
 
 /// **T9** — cap one end of a row with a vertical edge cell.
@@ -627,13 +633,14 @@ mod tests {
             p1: Point::new(80, 0),
         };
         // The row covers only [0, 40) of an edge that runs [0, 80).
-        let out = place_edge_horizontal(&e, &row("FRAG", "R0", 0, 40, 0), &[], &ms, &mut idx);
+        let out = place_edge_horizontal(&e, &row("FRAG", "R0", 0, 40, 0), &[], &ms, &mut idx).unwrap();
         assert_eq!(out.len(), 1, "only the fragment's own 40 wide span is filled");
         assert_eq!(out[0].x, 0);
         assert!(out.iter().all(|p| p.x + 40 <= 40), "nothing past the fragment");
     }
 
     #[test]
+    #[allow(non_snake_case)]
     fn touching_row_fragments_each_get_the_master_for_their_OWN_orientation() {
         // 🔑 **The rule, from upstream's own case `endcap_row_fragments`:** *"Fill both
         // horizontal boundaries across touching row fragments, selecting the edge master and
@@ -665,8 +672,8 @@ mod tests {
         let flipped = row("FRAG_MX", "MX", 40, 80, 0);
 
         let mut idx = 0;
-        let a = place_edge_horizontal(&e, &upright, &[], &ms, &mut idx);
-        let b = place_edge_horizontal(&e, &flipped, &[], &ms, &mut idx);
+        let a = place_edge_horizontal(&e, &upright, &[], &ms, &mut idx).unwrap();
+        let b = place_edge_horizontal(&e, &flipped, &[], &ms, &mut idx).unwrap();
 
         assert_eq!(a.len(), 1, "the R0 fragment fills its own span");
         assert_eq!(b.len(), 1, "and so does the flipped one");
@@ -687,7 +694,7 @@ mod tests {
             p0: Point::new(0, 0),
             p1: Point::new(80, 0),
         };
-        let out = place_edge_horizontal(&e, &row("ROW_0", "R0", 0, 80, 0), &[], &ms, &mut idx);
+        let out = place_edge_horizontal(&e, &row("ROW_0", "R0", 0, 80, 0), &[], &ms, &mut idx).unwrap();
         assert_eq!(out.len(), 2, "80 divides by the 40-wide master");
         assert!(out.iter().all(|p| p.master == "BE4"));
         assert_eq!(out.iter().map(|p| p.x).collect::<Vec<_>>(), vec![0, 40]);
@@ -720,7 +727,7 @@ mod tests {
             &[blocker],
             &ms,
             &mut idx,
-        );
+        ).unwrap();
         for p in &out {
             let cell = Rect::new(p.x, p.y, p.x + 20, p.y + 10);
             assert!(
@@ -757,7 +764,7 @@ mod tests {
             p1: Point::new(80, 0),
         };
         let mut idx = 0;
-        let out = place_edge_horizontal(&e, &row("ROW_0", "MX", 0, 80, 0), &[], &ms, &mut idx);
+        let out = place_edge_horizontal(&e, &row("ROW_0", "MX", 0, 80, 0), &[], &ms, &mut idx).unwrap();
         assert_eq!(out.len(), 4, "the span is filled, not abandoned: {out:?}");
         assert!(
             out.iter().all(|p| p.master == "BE_NARROW"),
@@ -776,7 +783,7 @@ mod tests {
             p0: Point::new(0, 0),
             p1: Point::new(50, 0),
         };
-        let out = place_edge_horizontal(&e, &row("ROW_0", "R0", 0, 50, 0), &[], &ms, &mut idx);
+        let out = place_edge_horizontal(&e, &row("ROW_0", "R0", 0, 50, 0), &[], &ms, &mut idx).unwrap();
         // The choice is re-made at every step against what REMAINS, so the narrow cell goes
         // first (50 % 10 == 0) and the wide one finishes the job (40 % 40 == 0) -- not the other
         // way round, which is the intuitive but wrong reading.
@@ -802,7 +809,7 @@ mod tests {
         // Corner cells occupy 0..10 and 90..100.
         let corners = [Rect::new(0, 0, 10, 10), Rect::new(90, 0, 100, 10)];
         let out =
-            place_edge_horizontal(&e, &row("ROW_0", "R0", 0, 100, 0), &corners, &ms, &mut idx);
+            place_edge_horizontal(&e, &row("ROW_0", "R0", 0, 100, 0), &corners, &ms, &mut idx).unwrap();
         assert!(!out.is_empty());
         assert_eq!(out[0].x, 10, "the fill starts after the corner cell");
         let last = out.last().unwrap();
@@ -870,7 +877,7 @@ mod tests {
             p0: Point::new(0, 0),
             p1: Point::new(80, 0),
         };
-        assert!(place_edge_horizontal(&e, &r, &[], &ms, &mut idx).is_empty());
+        assert!(place_edge_horizontal(&e, &r, &[], &ms, &mut idx).unwrap().is_empty());
         assert_eq!(idx, 0);
     }
 
@@ -1071,7 +1078,7 @@ pub fn place_all(
     rows: &[Row],
     masters: &EndcapMasters,
     phy_index: &mut usize,
-) -> Vec<Placement> {
+) -> Result<Vec<Placement>, Unfillable> {
     let mut out: Vec<Placement> = Vec::new();
     let mut filled: Vec<(EdgeType, i32, i32, i32, i32)> = Vec::new();
     // 🔑 **What each row already holds, PERSISTED ACROSS POLYGONS AND HOLES**, and split in two
@@ -1196,7 +1203,7 @@ pub fn place_all(
                         }
                         for row in edge_rows {
                             let placed =
-                                place_edge_horizontal(e, row, &blocked, masters, phy_index);
+                                place_edge_horizontal(e, row, &blocked, masters, phy_index)?;
                             note_edges(&mut edge_spans, &row.name, &placed, masters);
                             for pl in &placed {
                                 if let Some((w, h)) = masters.extent_of(&pl.master) {
@@ -1235,11 +1242,12 @@ pub fn place_all(
     }
     // ⚠️ **Displaced corners are removed HERE, not in place** — removing mid-run would shift
     // every later index and silently displace the wrong cell.
-    out.into_iter()
+    Ok(out
+        .into_iter()
         .enumerate()
         .filter(|(i, _)| !dead.contains(i))
         .map(|(_, p)| p)
-        .collect()
+        .collect())
 }
 #[cfg(test)]
 mod orchestration_tests {
@@ -1319,7 +1327,7 @@ mod orchestration_tests {
         ];
         let c = classify(&rs, BRect::new(0, 0, 80, 20));
         let mut idx = 0;
-        let out = place_all(&c, &rs, &ms_, &mut idx);
+        let out = place_all(&c, &rs, &ms_, &mut idx).unwrap();
 
         // ⚠️ Count EDGE masters only. A first version of this assertion counted every cell at
         // y == 0 and passed with the bug still in, because the right-bottom CORNER sits at
@@ -1338,7 +1346,7 @@ mod orchestration_tests {
         let rs = rows(4, 0, 100);
         let c = classify(&rs, BRect::new(0, 0, 100, 40));
         let mut idx = 0;
-        let out = place_all(&c, &rs, &ms(), &mut idx);
+        let out = place_all(&c, &rs, &ms(), &mut idx).unwrap();
 
         assert!(!out.is_empty());
         assert_eq!(
@@ -1366,7 +1374,7 @@ mod orchestration_tests {
         let rs = rows(4, 0, 100);
         let c = classify(&rs, BRect::new(0, 0, 100, 40));
         let mut idx = 0;
-        let out = place_all(&c, &rs, &ms(), &mut idx);
+        let out = place_all(&c, &rs, &ms(), &mut idx).unwrap();
 
         let mut by_y: std::collections::BTreeMap<i32, Vec<(i32, i32)>> = Default::default();
         for p in &out {
@@ -1421,7 +1429,7 @@ mod orchestration_tests {
         assert_eq!(c[0].holes.len(), 1, "the macro is a hole");
 
         let mut idx = 0;
-        let out = place_all(&c, &rs, &ms(), &mut idx);
+        let out = place_all(&c, &rs, &ms(), &mut idx).unwrap();
         // Inner corner cells use EDGE masters, so their presence proves the hole was walked.
         let inner: Vec<&Placement> = out
             .iter()
@@ -1469,7 +1477,7 @@ mod orchestration_tests {
         let rs = rows(2, 0, 100);
         let c = classify(&rs, BRect::new(0, 0, 100, 20));
         let mut idx = 0;
-        let out = place_all(&c, &rs, &ms(), &mut idx);
+        let out = place_all(&c, &rs, &ms(), &mut idx).unwrap();
         let mut seen: std::collections::BTreeSet<(i32, i32)> = Default::default();
         for p in &out {
             assert!(seen.insert((p.x, p.y)), "two cells at ({}, {})", p.x, p.y);
@@ -1570,25 +1578,51 @@ pub enum AutoselectError {
         position: String,
         /// The option THIS caller would use — see [`option_for`].
         option: String,
+        /// Whether the caller is the combined `tapcell` command (its Tcl option names differ).
+        tapcell: bool,
         ty: String,
         masters: Vec<String>,
     },
 }
 
 impl std::fmt::Display for AutoselectError {
+    /// TAP-0104 as the reference words it (its Tcl option, each candidate after a space), then this
+    /// CLI's own flag on a second line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AutoselectError::Ambiguous {
+                position,
                 option,
+                tapcell,
                 ty,
                 masters,
-                ..
-            } => write!(
-                f,
-                "found multiple masters of type {ty}; name one with {option} : {}",
-                masters.join(" ")
-            ),
+            } => {
+                let tcl = tcl_option_for(position, *tapcell);
+                let names: String = masters.iter().map(|m| format!(" {m}")).collect();
+                write!(f, "[ERROR TAP-0104] Found multiple masters for {ty}. Use -{tcl} to specify one of the following cells: {names}\nvyges-tap: name one with {option}")
+            }
         }
+    }
+}
+
+/// `correctEndcapOptions`' option name for a position (TAP-0104's `-{}`): the `tapcell` command's
+/// own options, else the position's (an edge also naming `-endcap`).
+pub fn tcl_option_for(position: &str, tapcell: bool) -> String {
+    if tapcell {
+        return match position {
+            "left_edge" | "right_edge" => "endcap_master",
+            "right_top_corner" | "left_top_corner" => "cnrcap_nwout_master",
+            "right_bottom_corner" | "left_bottom_corner" => "cnrcap_nwin_master",
+            "right_top_edge" | "left_top_edge" => "incnrcap_nwin_master",
+            "right_bottom_edge" | "left_bottom_edge" => "incnrcap_nwout_master",
+            p => return p.to_string(),
+        }
+        .to_string();
+    }
+    match position {
+        "left_edge" => "left_edge/-endcap".to_string(),
+        "right_edge" => "right_edge/-endcap".to_string(),
+        p => p.to_string(),
     }
 }
 
@@ -1639,6 +1673,7 @@ pub fn autoselect(
                     return Err(AutoselectError::Ambiguous {
                         position: p.to_string(),
                         option: option_for(p, caller),
+                        tapcell: caller == Caller::Tapcell,
                         ty: ty.to_string(),
                         masters: found.iter().map(|s| s.to_string()).collect(),
                     });

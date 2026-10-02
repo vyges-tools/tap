@@ -145,6 +145,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
     fn ZERO_would_disable_the_check_entirely_so_it_is_never_the_answer_here() {
         // ⚠️ odb gates narrow-region cutting on `min_row_height > 0`. `ifp` passes 0 because it
         // places no endcaps; a tapcell run passing 0 keeps slivers it can never fill.

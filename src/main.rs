@@ -92,7 +92,7 @@ const DESCRIBE: &str = r#"{
       "Unnamed endcap positions are filled from the library's own LEF58 master types (odb reports these as space-separated strings like \"ENDCAP LEFTBOTTOMCORNER\", not the enum spelling). Two masters claiming one position is an ERROR naming both, not a coin flip: a wrong endcap is a well-tie fault nobody sees until silicon. A position nothing fills stays empty and places nothing.",
       "Taps and endcaps use DIFFERENT default name prefixes -- TAP_ and PHY_ -- because they are separate namespaces that can be ripped up independently.",
       "MEASURED 2026-09-03 against the upstream goldens at pin 7d490b8ecd357199c0c0e9f3e32becd5eb507c34: cut_rows 10 of 10 comparable cases exact (DEF ROW diff), endcap placement 9 of 9 exact, and combined tapcell 20 of 20 -- every physical cell matching the golden in master, position and orientation. Unchanged from the previous pin 945a9f48dc6e5cc91d865daa92c45a1094cb682c. The pin is spelled out rather than substituted: a MEASUREMENT names the commit it was taken at, not whatever this binary was later built against.",
-      "NOT scored: upstream added `cut_rows_short_core` at 7d490b8ecd357199c0c0e9f3e32becd5eb507c34 and it is SKIPPED -- it needs `-row_min_height`, the `min_row_height` parameter `odb::cutRows` gained at the previous pin and which this engine passes as 0. Upstream now ships a test for it, so the deferred question of whether tap should USE it has a witness.",
+      "--row-min-height is scored: the cut_rows regression case that sets a minimum row height (`cut_rows_short_core`) is exact at pin da9f29f18b6487825aa880597176e0fa97110b31 (measured 2026-10-02). The minimum height is the larger of twice the endcap height plus the tallest core cell and the option; this line previously said the engine passed 0, which was true of the harness, not the engine.",
       "status is one of applied, planned, vacuous or error. VACUOUS IS NOT APPLIED: it means the run changed nothing -- no row cut, no cell inserted, none removed -- and the declared assertion passes only on applied, so a no-op fails it rather than reporting a transformation that did not happen. Zero may still be the right answer for the design; read the count and decide. A dry run reports planned, which never claimed to have applied anything.",
       "All five commands are implemented: cut-rows, place-endcaps, place-tapcells, the combined tapcell, and ripup. Rip-up matches by NAME PREFIX, which is the only mark these cells carry -- they are physical-only instances with no nets. An EMPTY prefix removes nothing rather than everything, which is the difference between undoing a tap step and destroying the design.",
       "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin @OPENROAD_PIN@ and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
@@ -247,11 +247,16 @@ fn cut_rows(args: &[String]) -> ExitCode {
     // — before `findBlockages`, and before any row is touched. `cut_rows` only measures the endcap
     // to size the row floor, but it refuses a master it could not later place.
     if let Some(name) = cli.endcap_master.as_deref() {
-        if let Ok(m) = read_master(&db, name) {
-            if let Err(e) = check_placeable(&db, Some(&m), "-endcap_master") {
-                eprintln!("vyges-tap: {e}");
+        let m = match named_master(&db, name, not_found("TAP-0034")) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{e}");
                 return ExitCode::from(2);
             }
+        };
+        if let Err(e) = check_placeable(&db, Some(&m), "-endcap_master") {
+            eprintln!("{e}");
+            return ExitCode::from(2);
         }
     }
 
@@ -454,17 +459,71 @@ fn max_core_cell_height(db: &Db) -> i32 {
 /// reports `-left_top_corner` for a master supplied via `-corner`, because the check runs on the
 /// resolved option struct. Invisible to every harness: `invalid_master_class` has an `.ok` and no
 /// `.defok`, so no golden diff reaches it.
+///
+/// Rule (`checkPlaceable`): a BLOCK master passes `isCoreAutoPlaceable` and is refused anyway — it is
+/// a macro, and an endcap master's size sets the minimum row width and height `cut_rows` cuts by,
+/// so a macro-sized one would cut away rows that should stay. The error is TAP-0036, raised for the
+/// first offending option in the command's own order.
 fn check_placeable(db: &Db, master: Option<&Master>, option: &str) -> Result<(), String> {
     let Some(m) = master else { return Ok(()) };
-    if db.master_is_core_auto_placeable(&m.name) {
+    if db.master_is_core_auto_placeable(&m.name) && !db.master_is_block(&m.name) {
         return Ok(());
     }
     let class = db.master_get_type(&m.name).unwrap_or_default();
-    Err(format!(
-        "master {} with class {} given for {} cannot be placed in core rows and would be \
-         ignored by detailed placement",
-        m.name, class, option
-    ))
+    Err(format!("[ERROR TAP-0036] Master {} with class {} given for {} cannot be placed in core rows.", m.name, class, option))
+}
+
+/// Every master with its type, in the order `findMasterByType` collects them: an `odb::PtrSet`,
+/// ordered by `compare_by_id` — the master's id (its position in its library), then its library's.
+/// With one library that is the library's own order; with two, the first master of each comes
+/// before the second of either. TAP-0104's candidate list and the auto-selected master
+/// (`*masters.begin()`) both follow it.
+fn masters_in_id_order(db: &Db) -> Result<Vec<(String, String)>, vyges_opendb::Error> {
+    let all = db.masters_with_types()?;
+    let mut libs: Vec<String> = Vec::new();
+    let mut keyed: Vec<((usize, usize), (String, String))> = Vec::new();
+    let mut per_lib: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (name, ty) in all {
+        let lib = db.master_get_lib(&name);
+        let lib_idx = libs.iter().position(|l| *l == lib).unwrap_or_else(|| {
+            libs.push(lib.clone());
+            libs.len() - 1
+        });
+        let pos = per_lib.entry(lib).or_insert(0);
+        keyed.push(((*pos, lib_idx), (name, ty)));
+        *pos += 1;
+    }
+    keyed.sort_by_key(|(k, _)| *k);
+    Ok(keyed.into_iter().map(|(_, m)| m).collect())
+}
+
+/// A master the command names, refused as the reference refuses an unknown one — each command with
+/// its own diagnostic (`tapcell`: TAP-0010 for `-tapcell_master`, TAP-0011 for `-endcap_master`;
+/// `cut_rows`: TAP-0034; `place_tapcells` / `place_endcaps`: TAP-0102 "Unable to find").
+fn named_master(db: &Db, name: &str, unknown: impl Fn(&str) -> String) -> Result<Master, String> {
+    if db.master_get_type(name).unwrap_or_default().is_empty() {
+        return Err(unknown(name));
+    }
+    read_master(db, name)
+}
+
+/// TAP-0020 as the reference words it: the edge, the row, and the span in microns (`{:.4f}`).
+fn unfillable(u: &endcaps::Unfillable, dbu: f64) -> String {
+    format!(
+        "[ERROR TAP-0020] Unable to fill {:?} boundary in {} from {:.4}um to {:.4}um",
+        u.edge,
+        u.row,
+        f64::from(u.x) / dbu,
+        f64::from(u.x_end) / dbu
+    )
+}
+
+fn not_found(code: &'static str) -> impl Fn(&str) -> String {
+    move |n| format!("[ERROR {code}] Master {n} not found.")
+}
+
+fn unable_to_find(n: &str) -> String {
+    format!("[ERROR TAP-0102] Unable to find {n}")
 }
 
 fn read_master(db: &Db, name: &str) -> Result<Master, String> {
@@ -673,17 +732,17 @@ fn place_tapcells(args: &[String]) -> ExitCode {
         eprintln!("vyges-tap: `place-tapcells` needs --master");
         return ExitCode::from(2);
     };
-    let master = match read_master(&db, master_name) {
+    let master = match named_master(&db, master_name, unable_to_find) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("vyges-tap: {e}");
+            eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
     // Upstream `placeTapcells(Options)` checks the master straight after the null test and before
     // the distance default, and names the option `-master`.
     if let Err(e) = check_placeable(&db, Some(&master), "-master") {
-        eprintln!("vyges-tap: {e}");
+        eprintln!("{e}");
         return ExitCode::from(2);
     }
     let dist = match opts.get("distance") {
@@ -782,7 +841,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (mut db, _) = match open_scaled(&opts.odb) {
+    let (mut db, dbu) = match open_scaled(&opts.odb) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -794,7 +853,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let pick = |specific: &str, mid: &str, general: &str| -> Result<Option<Master>, String> {
         for k in [specific, mid, general] {
             if let Some(n) = opts.get(k) {
-                return read_master(&db, n).map(Some);
+                return named_master(&db, n, unable_to_find).map(Some);
             }
         }
         Ok(None)
@@ -805,7 +864,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
                 return v
                     .split([',', ' '])
                     .filter(|t| !t.is_empty())
-                    .map(|n| read_master(&db, n))
+                    .map(|n| named_master(&db, n, unable_to_find))
                     .collect();
             }
         }
@@ -860,7 +919,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     ];
     for (m, option) in named {
         if let Err(e) = check_placeable(&db, m, option) {
-            eprintln!("vyges-tap: {e}");
+            eprintln!("{e}");
             return ExitCode::from(2);
         }
     }
@@ -870,7 +929,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     ] {
         for m in list {
             if let Err(e) = check_placeable(&db, Some(m), option) {
-                eprintln!("vyges-tap: {e}");
+                eprintln!("{e}");
                 return ExitCode::from(2);
             }
         }
@@ -878,7 +937,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
 
     // Anything the caller did not name is filled from the library's own master types. A library
     // that states nothing useful leaves those positions empty, and placement puts nothing there.
-    let library = match db.masters_with_types() {
+    let library = match masters_in_id_order(&db) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("vyges-tap: cannot read the master library: {e}");
@@ -886,7 +945,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
         }
     };
     if let Err(e) = endcaps::autoselect(&mut masters, &library, endcaps::Caller::PlaceEndcaps, |n| read_master(&db, n).ok()) {
-        eprintln!("vyges-tap: {e}");
+        eprintln!("{e}");
         return ExitCode::from(2);
     }
 
@@ -894,7 +953,13 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let region = boundary::row_region(core, &rows.iter().map(|r| r.bbox).collect::<Vec<_>>());
     let classified = boundary::classify(&region);
     let mut idx = 0usize;
-    let planned = endcaps::place_all(&classified, &rows, &masters, &mut idx);
+    let planned = match endcaps::place_all(&classified, &rows, &masters, &mut idx) {
+        Ok(p) => p,
+        Err(u) => {
+            eprintln!("{}", unfillable(&u, dbu));
+            return ExitCode::from(2);
+        }
+    };
 
     if !opts.dry_run {
         if let Err(e) = apply(&mut db, &planned) {
@@ -969,6 +1034,16 @@ fn tapcell(args: &[String]) -> ExitCode {
         row_min: Option<i32>,
     }
 
+    // The Tcl command resolves exactly two masters itself, in this order, before anything else:
+    // `-tapcell_master` (TAP-0010), then `-endcap_master` (TAP-0011).
+    for (key, code) in [("tapcell-master", "TAP-0010"), ("endcap-master", "TAP-0011")] {
+        if let Some(n) = opts.get(key) {
+            if let Err(e) = named_master(&db, n, not_found(code)) {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     let gathered = (|| -> Result<Gathered, String> {
         Ok(Gathered {
             flat: TapcellMasters {
@@ -1027,7 +1102,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     ];
     for (m, option) in all_twelve {
         if let Err(e) = check_placeable(&db, m, option) {
-            eprintln!("vyges-tap: {e}");
+            eprintln!("{e}");
             return ExitCode::from(2);
         }
     }
@@ -1065,7 +1140,7 @@ fn tapcell(args: &[String]) -> ExitCode {
 
     // ---- phase 2: cap the boundary. Rows are re-read HERE, after cutting. ----
     let mut masters = flat.to_positions();
-    let library = match db.masters_with_types() {
+    let library = match masters_in_id_order(&db) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("vyges-tap: cannot read the master library: {e}");
@@ -1073,7 +1148,7 @@ fn tapcell(args: &[String]) -> ExitCode {
         }
     };
     if let Err(e) = endcaps::autoselect(&mut masters, &library, endcaps::Caller::Tapcell, |n| read_master(&db, n).ok()) {
-        eprintln!("vyges-tap: {e}");
+        eprintln!("{e}");
         return ExitCode::from(2);
     }
 
@@ -1082,7 +1157,13 @@ fn tapcell(args: &[String]) -> ExitCode {
     let classified = boundary::classify(&region);
     // One counter across both phases: upstream numbers every physical instance in one sequence.
     let mut idx = 0usize;
-    let endcap_cells = endcaps::place_all(&classified, &rows, &masters, &mut idx);
+    let endcap_cells = match endcaps::place_all(&classified, &rows, &masters, &mut idx) {
+        Ok(p) => p,
+        Err(u) => {
+            eprintln!("{}", unfillable(&u, dbu));
+            return ExitCode::from(2);
+        }
+    };
 
     // ---- phase 3: the taps ----
     // The endcaps are applied FIRST and then read back as obstacles, which is what upstream does

@@ -95,7 +95,7 @@ const DESCRIBE: &str = r#"{
       "--row-min-height is scored: the cut_rows regression case that sets a minimum row height (`cut_rows_short_core`) is exact at pin 27288f5c90265ae5296b2f5a9fa6e8714fa191ad (measured 2026-10-12), as it was at pin da9f29f18b6487825aa880597176e0fa97110b31 (2026-10-02). The minimum height is the larger of twice the endcap height plus the tallest core cell and the option; this line previously said the engine passed 0, which was true of the harness, not the engine.",
       "status is one of applied, planned, vacuous or error. VACUOUS IS NOT APPLIED: it means the run changed nothing -- no row cut, no cell inserted, none removed -- and the declared assertion passes only on applied, so a no-op fails it rather than reporting a transformation that did not happen. Zero may still be the right answer for the design; read the count and decide. A dry run reports planned, which never claimed to have applied anything.",
       "All five commands are implemented: cut-rows, place-endcaps, place-tapcells, the combined tapcell, and ripup. Rip-up matches by NAME PREFIX, which is the only mark these cells carry -- they are physical-only instances with no nets. An EMPTY prefix removes nothing rather than everything, which is the difference between undoing a tap step and destroying the design.",
-      "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin @OPENROAD_PIN@ and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
+      "COMBINED TAPCELL IS 20 OF 20 AT THIS PIN. It was 16 of 16 at the previous pin b5624809f29048e1f9ce9e83eb562620c652e084 and read 14 of 20 the moment the pin moved, with nothing in this engine changed: upstream had reworked endcap placement across sixteen commits and added four regression cases. A SCORE IS ONLY TRUE OF ONE COMMIT -- quote the pin beside it. The last case closed by walking a hole the way the reference walks it: the reference receives holes wound like outer boundaries and walks every ring counter-clockwise, while this engine winds holes clockwise, so the classification agreed and the placement ORDER did not -- and where two cells contend for one position, whichever is walked to first keeps it.",
       "Row cutting itself is odb's own cutRows from odb/util.h, not a reimplementation: it is odb's algorithm on odb's rows, and OpenDB is the substrate. What this engine decides is the policy around it -- which instances are blockages, the halo, and the minimum row width.",
       "Blockages are placed macros (dbInst::isBlock). A macro that is NOT placed is skipped and reported by name (upstream TAP-32), never silently ignored, because rows would otherwise be left crossing wherever it lands.",
       "The minimum row width is the LARGER of two endcap widths and any --row-min-width given, so a caller's floor cannot quietly produce rows too narrow to cap.",
@@ -1457,5 +1457,23 @@ mod pin_tests {
             );
         }
         assert!(seen > 0, "the descriptor should carry at least one MEASURED claim");
+    }
+
+    /// A PREVIOUS pin is history: the token there names the CURRENT pin as the previous one.
+    ///
+    /// ⛔ The combined-tapcell line read "16 of 16 at the previous pin b5624809..." until a pin
+    /// bump substituted the token for the literal; at 27288f5 the generated reference said the
+    /// score was 16 of 16 at the previous pin 27288f5 -- the pin it was then built against.
+    #[test]
+    fn a_previous_pin_is_a_literal_not_the_token() {
+        let raw: serde_json::Value =
+            serde_json::from_str(super::DESCRIBE).expect("valid JSON");
+        for lim in raw["provenance_limitations"].as_array().expect("an array") {
+            let t = lim.as_str().unwrap();
+            assert!(
+                !t.contains(&format!("previous pin {PIN_TOKEN}")),
+                "a previous pin must be spelled out, not {PIN_TOKEN}: {t}"
+            );
+        }
     }
 }

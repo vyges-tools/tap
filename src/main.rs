@@ -14,6 +14,48 @@ use vyges_tap::{
     select_blockages, Instance,
 };
 
+/// A diagnostic as a structured event (`vyges-events/1.0`) instead of a bare stderr line: a message
+/// that opens with a reference line's `[SEVERITY TAP-nnnn] ` keeps that code and severity; ours
+/// (`vyges-tap: …`) is `TAP-ERROR`; text after a blank line (the usage) stays plain help on stderr.
+fn diag_line(msg: String) {
+    use vyges_events::{emit, Event, Severity};
+    let (head, help) = match msg.split_once("\n\n") {
+        Some((h, rest)) => (h.to_string(), Some(rest.to_string())),
+        None => (msg, None),
+    };
+    // One event per line: a reference line and our hint after it are two messages.
+    if let Some((first, rest)) = head.split_once('\n') {
+        diag_line(first.to_string());
+        for l in rest.lines() {
+            diag_line(l.to_string());
+        }
+        if let Some(h) = help {
+            eprintln!("{h}");
+        }
+        return;
+    }
+    let parsed = head.strip_prefix('[').and_then(|r| r.split_once("] ")).and_then(|(tag, text)| tag.split_once(' ').map(|(sev, code)| (sev.to_string(), code.to_string(), text.to_string())));
+    let ev = match parsed {
+        Some((sev, code, text)) => {
+            let severity = match sev.as_str() {
+                "WARNING" => Severity::Warn,
+                "INFO" => Severity::Info,
+                _ => Severity::Error,
+            };
+            Event::new("vyges-tap", severity, text).with_code(&code)
+        }
+        None => Event::new("vyges-tap", Severity::Error, head.strip_prefix("vyges-tap: ").unwrap_or(&head).to_string()).with_code("TAP-ERROR"),
+    };
+    emit(&ev);
+    if let Some(h) = help {
+        eprintln!("{h}");
+    }
+}
+
+macro_rules! diag {
+    ($($t:tt)*) => { diag_line(format!($($t)*)) };
+}
+
 // ⚠️ The prefix here is the CLI GROUP this engine belongs to, and vyges-cli's MODULES
 // registry is what actually decides it (`group: "physical"`). It read `vyges loom tap`
 // for a release after the construction engines were split out of the loom suite, because
@@ -203,7 +245,7 @@ fn cut_rows(args: &[String]) -> ExitCode {
     let cli = match parse_args(args) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("vyges-tap: {e}\n\n{USAGE}");
+            diag!("vyges-tap: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -211,13 +253,13 @@ fn cut_rows(args: &[String]) -> ExitCode {
     let mut db = match Db::open(&cli.odb) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("vyges-tap: cannot read {}: {e}", cli.odb);
+            diag!("vyges-tap: cannot read {}: {e}", cli.odb);
             return ExitCode::from(2);
         }
     };
     let dbu = db.dbu_per_micron();
     if dbu <= 0 {
-        eprintln!("vyges-tap: no DBU scale; cannot convert microns");
+        diag!("vyges-tap: no DBU scale; cannot convert microns");
         return ExitCode::from(2);
     }
     let dbu_f = dbu as f64;
@@ -236,7 +278,7 @@ fn cut_rows(args: &[String]) -> ExitCode {
     let endcap_width = cli.endcap_master.as_deref().map(|m| {
         let w = db.master_get_width(m) as i32;
         if w <= 0 {
-            eprintln!("vyges-tap: endcap master `{m}` is unknown or has no width");
+            diag!("vyges-tap: endcap master `{m}` is unknown or has no width");
         }
         w
     });
@@ -250,12 +292,12 @@ fn cut_rows(args: &[String]) -> ExitCode {
         let m = match named_master(&db, name, not_found("TAP-0034")) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("{e}");
+                diag!("{e}");
                 return ExitCode::from(2);
             }
         };
         if let Err(e) = check_placeable(&db, Some(&m), "-endcap_master") {
-            eprintln!("{e}");
+            diag!("{e}");
             return ExitCode::from(2);
         }
     }
@@ -281,12 +323,12 @@ fn cut_rows(args: &[String]) -> ExitCode {
     if !cli.dry_run {
         if let Err(e) = db.cut_rows(min_width, min_height, &blockages.cut_around, halo_x, halo_y)
         {
-            eprintln!("vyges-tap: cannot cut rows: {e}");
+            diag!("vyges-tap: cannot cut rows: {e}");
             return ExitCode::from(2);
         }
         let out = cli.out_odb.clone().unwrap_or_else(|| cli.odb.clone());
         if let Err(e) = db.write(&out) {
-            eprintln!("vyges-tap: cannot write {out}: {e}");
+            diag!("vyges-tap: cannot write {out}: {e}");
             return ExitCode::from(2);
         }
         written = Some(out);
@@ -295,7 +337,7 @@ fn cut_rows(args: &[String]) -> ExitCode {
     // even on a dry run: the point is to see what WOULD land without committing it.
     if let Some(def) = cli.out_def.as_deref() {
         if let Err(e) = db.write_def(def) {
-            eprintln!("vyges-tap: cannot write {def}: {e}");
+            diag!("vyges-tap: cannot write {def}: {e}");
             return ExitCode::from(2);
         }
     }
@@ -328,7 +370,7 @@ fn cut_rows(args: &[String]) -> ExitCode {
     match cli.report.as_deref() {
         Some(f) => {
             if let Err(e) = std::fs::write(f, format!("{json}\n")) {
-                eprintln!("vyges-tap: cannot write {f}: {e}");
+                diag!("vyges-tap: cannot write {f}: {e}");
                 return ExitCode::from(2);
             }
         }
@@ -378,13 +420,13 @@ fn emit_events(
 /// the corner rules checkable against the goldens, which carry the type in each instance name.
 fn boundary_report(args: &[String]) -> ExitCode {
     let Some(path) = args.iter().find(|a| !a.starts_with('-')) else {
-        eprintln!("vyges-tap: `boundary` needs a path to a .odb\n\n{USAGE}");
+        diag!("vyges-tap: `boundary` needs a path to a .odb\n\n{USAGE}");
         return ExitCode::from(2);
     };
     let db = match Db::open(path) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("vyges-tap: cannot read {path}: {e}");
+            diag!("vyges-tap: cannot read {path}: {e}");
             return ExitCode::from(2);
         }
     };
@@ -600,12 +642,12 @@ fn apply(db: &mut Db, placements: &[Placement]) -> Result<usize, String> {
 /// Open the database and check it has a usable scale — the preamble every verb shares.
 fn open_scaled(path: &str) -> Result<(Db, f64), ExitCode> {
     let db = Db::open(path).map_err(|e| {
-        eprintln!("vyges-tap: cannot read {path}: {e}");
+        diag!("vyges-tap: cannot read {path}: {e}");
         ExitCode::from(2)
     })?;
     let dbu = db.dbu_per_micron();
     if dbu <= 0 {
-        eprintln!("vyges-tap: no DBU scale");
+        diag!("vyges-tap: no DBU scale");
         return Err(ExitCode::from(2));
     }
     Ok((db, dbu as f64))
@@ -617,14 +659,14 @@ fn finish(db: &Db, path: &str, opts: &Opts, planned: usize, what: &str) -> ExitC
     if !opts.dry_run {
         let out = opts.out_odb.clone().unwrap_or_else(|| path.to_string());
         if let Err(e) = db.write(&out) {
-            eprintln!("vyges-tap: cannot write {out}: {e}");
+            diag!("vyges-tap: cannot write {out}: {e}");
             return ExitCode::from(2);
         }
         written = Some(out);
     }
     if let Some(def) = opts.out_def.as_deref() {
         if let Err(e) = db.write_def(def) {
-            eprintln!("vyges-tap: cannot write {def}: {e}");
+            diag!("vyges-tap: cannot write {def}: {e}");
             return ExitCode::from(2);
         }
     }
@@ -720,7 +762,7 @@ fn place_tapcells(args: &[String]) -> ExitCode {
     let opts = match parse_opts(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("vyges-tap: {e}\n\n{USAGE}");
+            diag!("vyges-tap: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -729,27 +771,27 @@ fn place_tapcells(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     let Some(master_name) = opts.get("master") else {
-        eprintln!("vyges-tap: `place-tapcells` needs --master");
+        diag!("vyges-tap: `place-tapcells` needs --master");
         return ExitCode::from(2);
     };
     let master = match named_master(&db, master_name, unable_to_find) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{e}");
+            diag!("{e}");
             return ExitCode::from(2);
         }
     };
     // Upstream `placeTapcells(Options)` checks the master straight after the null test and before
     // the distance default, and names the option `-master`.
     if let Err(e) = check_placeable(&db, Some(&master), "-master") {
-        eprintln!("{e}");
+        diag!("{e}");
         return ExitCode::from(2);
     }
     let dist = match opts.get("distance") {
         Some(v) => match v.parse::<f64>() {
             Ok(um) => (um * dbu).round() as i32,
             Err(_) => {
-                eprintln!("vyges-tap: --distance wants a number, got `{v}`");
+                diag!("vyges-tap: --distance wants a number, got `{v}`");
                 return ExitCode::from(2);
             }
         },
@@ -826,7 +868,7 @@ fn place_tapcells(args: &[String]) -> ExitCode {
 
     if !opts.dry_run {
         if let Err(e) = apply(&mut db, &planned) {
-            eprintln!("vyges-tap: {e}");
+            diag!("vyges-tap: {e}");
             return ExitCode::from(2);
         }
     }
@@ -837,7 +879,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let opts = match parse_opts(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("vyges-tap: {e}\n\n{USAGE}");
+            diag!("vyges-tap: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -896,7 +938,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let mut masters = match build() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("vyges-tap: {e}");
+            diag!("vyges-tap: {e}");
             return ExitCode::from(2);
         }
     };
@@ -919,7 +961,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     ];
     for (m, option) in named {
         if let Err(e) = check_placeable(&db, m, option) {
-            eprintln!("{e}");
+            diag!("{e}");
             return ExitCode::from(2);
         }
     }
@@ -929,7 +971,7 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     ] {
         for m in list {
             if let Err(e) = check_placeable(&db, Some(m), option) {
-                eprintln!("{e}");
+                diag!("{e}");
                 return ExitCode::from(2);
             }
         }
@@ -940,12 +982,12 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let library = match masters_in_id_order(&db) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("vyges-tap: cannot read the master library: {e}");
+            diag!("vyges-tap: cannot read the master library: {e}");
             return ExitCode::from(2);
         }
     };
     if let Err(e) = endcaps::autoselect(&mut masters, &library, endcaps::Caller::PlaceEndcaps, |n| read_master(&db, n).ok()) {
-        eprintln!("{e}");
+        diag!("{e}");
         return ExitCode::from(2);
     }
 
@@ -956,14 +998,14 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let planned = match endcaps::place_all(&classified, &rows, &masters, &mut idx) {
         Ok(p) => p,
         Err(u) => {
-            eprintln!("{}", unfillable(&u, dbu));
+            diag!("{}", unfillable(&u, dbu));
             return ExitCode::from(2);
         }
     };
 
     if !opts.dry_run {
         if let Err(e) = apply(&mut db, &planned) {
-            eprintln!("vyges-tap: {e}");
+            diag!("vyges-tap: {e}");
             return ExitCode::from(2);
         }
     }
@@ -980,7 +1022,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     let opts = match parse_opts(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("vyges-tap: {e}\n\n{USAGE}");
+            diag!("vyges-tap: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -1039,7 +1081,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     for (key, code) in [("tapcell-master", "TAP-0010"), ("endcap-master", "TAP-0011")] {
         if let Some(n) = opts.get(key) {
             if let Err(e) = named_master(&db, n, not_found(code)) {
-                eprintln!("{e}");
+                diag!("{e}");
                 return ExitCode::from(2);
             }
         }
@@ -1077,7 +1119,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     } = match gathered {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("vyges-tap: {e}");
+            diag!("vyges-tap: {e}");
             return ExitCode::from(2);
         }
     };
@@ -1102,7 +1144,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     ];
     for (m, option) in all_twelve {
         if let Err(e) = check_placeable(&db, m, option) {
-            eprintln!("{e}");
+            diag!("{e}");
             return ExitCode::from(2);
         }
     }
@@ -1134,7 +1176,7 @@ fn tapcell(args: &[String]) -> ExitCode {
         or_default(halo_x, default),
         or_default(halo_y, default),
     ) {
-        eprintln!("vyges-tap: cannot cut rows: {e}");
+        diag!("vyges-tap: cannot cut rows: {e}");
         return ExitCode::from(2);
     }
 
@@ -1143,12 +1185,12 @@ fn tapcell(args: &[String]) -> ExitCode {
     let library = match masters_in_id_order(&db) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("vyges-tap: cannot read the master library: {e}");
+            diag!("vyges-tap: cannot read the master library: {e}");
             return ExitCode::from(2);
         }
     };
     if let Err(e) = endcaps::autoselect(&mut masters, &library, endcaps::Caller::Tapcell, |n| read_master(&db, n).ok()) {
-        eprintln!("{e}");
+        diag!("{e}");
         return ExitCode::from(2);
     }
 
@@ -1160,7 +1202,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     let endcap_cells = match endcaps::place_all(&classified, &rows, &masters, &mut idx) {
         Ok(p) => p,
         Err(u) => {
-            eprintln!("{}", unfillable(&u, dbu));
+            diag!("{}", unfillable(&u, dbu));
             return ExitCode::from(2);
         }
     };
@@ -1172,7 +1214,7 @@ fn tapcell(args: &[String]) -> ExitCode {
     // taps walk straight through it. Applying mutates only the in-memory database; nothing is
     // written unless the caller asked for it.
     if let Err(e) = apply(&mut db, &endcap_cells) {
-        eprintln!("vyges-tap: {e}");
+        diag!("vyges-tap: {e}");
         return ExitCode::from(2);
     }
     let obstacles: Vec<boundary::Rect> = db
@@ -1225,7 +1267,7 @@ fn tapcell(args: &[String]) -> ExitCode {
 
     if !opts.dry_run {
         if let Err(e) = apply(&mut db, &tap_cells) {
-            eprintln!("vyges-tap: {e}");
+            diag!("vyges-tap: {e}");
             return ExitCode::from(2);
         }
     }
@@ -1248,14 +1290,14 @@ fn ripup(args: &[String]) -> ExitCode {
     let opts = match parse_opts(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("vyges-tap: {e}\n\n{USAGE}");
+            diag!("vyges-tap: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
     let mut db = match Db::open(&opts.odb) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("vyges-tap: cannot read {}: {e}", opts.odb);
+            diag!("vyges-tap: cannot read {}: {e}", opts.odb);
             return ExitCode::from(2);
         }
     };
@@ -1267,7 +1309,7 @@ fn ripup(args: &[String]) -> ExitCode {
     if !opts.dry_run {
         for n in taps.iter().chain(endcaps.iter()) {
             if let Err(e) = db.destroy_inst(n) {
-                eprintln!("vyges-tap: cannot remove {n}: {e}");
+                diag!("vyges-tap: cannot remove {n}: {e}");
                 return ExitCode::from(2);
             }
         }
@@ -1327,7 +1369,7 @@ fn main() -> ExitCode {
         "ripup" => ripup(&args[1..]),
         "tapcell" => tapcell(&args[1..]),
         other => {
-            eprintln!("vyges-tap: unknown command `{other}`\n\n{USAGE}");
+            diag!("vyges-tap: unknown command `{other}`\n\n{USAGE}");
             ExitCode::from(2)
         }
     }

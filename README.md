@@ -2,7 +2,7 @@
 
 Row cutting and physical-cell insertion over the OpenDB design database.
 
-All five commands are implemented and checked against the upstream goldens: `cut-rows`,
+All five commands are implemented and checked against the reference goldens: `cut-rows`,
 `place-endcaps`, `place-tapcells`, the combined `tapcell`, and `ripup`.
 
 ```text
@@ -36,21 +36,21 @@ The same reasoning covers `odb::hasOneSiteMaster` and `odb::makeSiteLoc`.
 
 ## Correctness — measured, not claimed
 
-Checked against the upstream `tap` regression goldens at pin
-`945a9f48dc6e5cc91d865daa92c45a1094cb682c` (`vyges-openroad 2026.08.0`), re-measured 2026-08-23.
+Checked against the reference `tap` regression goldens at pin
+`945a9f48dc6e5cc91d865daa92c45a1094cb682c` (reference build `2026.08.0`), re-measured 2026-08-23.
 
-⚠️ **A correlation result is a statement about one upstream commit.** This one was exact at the
+⚠️ **A correlation result is a statement about one reference commit.** This one was exact at the
 previous pin and is not at this one — see the table.
 
-Unlike a floorplan, this engine prints almost nothing — four message codes in the whole upstream
+Unlike a floorplan, this engine prints almost nothing — four message codes in the whole reference
 module — so its goldens are **DEF, not logs**. Conformance therefore diffs the DEF `ROW` section
-against each case's `.defok`: every row's name, site, origin, orientation and step.
+against each case's golden DEF: every row's name, site, origin, orientation and step.
 
 | | |
 | --- | --- |
 | **10 pass** | every golden `ROW` line identical — every case whose row cutting we can drive |
 | **0 fail** | |
-| **28 not comparable** | 26 need `tapcell`/`place_endcaps`/`place_tapcells`; 2 have no `.defok` |
+| **28 not comparable** | 26 need `tapcell`/`place_endcaps`/`place_tapcells`; 2 have no golden DEF |
 
 **Ten of ten is not ten of thirty-eight.** The implemented subset is exact, and the subset is
 small. The suite does not really open up until endcap placement exists.
@@ -74,27 +74,27 @@ the row it lands in.
 Every physical cell is compared — name, master, position, orientation — plus the DEF `ROW` lines.
 The largest case places 22,844 cells.
 
-**Where it stands.** Three fixes have tracked upstream's rework: the odb narrow-region cut height,
+**Where it stands.** Three fixes have tracked the reference's rework: the odb narrow-region cut height,
 row occupancy persisting across polygons and holes, and corner displacement. One case remains —
 `abutting_macros_step_no_corners`, where four cells sit at the right coordinates under the wrong
-edge kind: a die-corner position upstream attributes to the horizontal edge and this engine to the
+edge kind: a die-corner position the reference attributes to the horizontal edge and this engine to the
 vertical one. Cell count, positions and rows all match.
 
-**Why combined `tapcell` regressed.** Between the two pins upstream changed endcap and tapcell
-placement across five commits — `src/tap` moved by 32 files, +8,323/−243 — and this engine has not
-tracked those changes. Six cases differ; **four of them are new upstream cases**, and all six have
-changed goldens, so this is upstream behaviour not yet implemented rather than a defect introduced
+**Why combined `tapcell` regressed.** Between the two pins the reference changed endcap and tapcell
+placement across five commits — its `tap` sources moved by 32 files, +8,323/−243 — and this engine has not
+tracked those changes. Six cases differ; **four of them are new reference cases**, and all six have
+changed goldens, so this is reference behaviour not yet implemented rather than a defect introduced
 here. Both the instance naming and the orientation moved:
 
 ```text
 ours      PHY_EDGE_ROW_0_Left        TAPCELL_X1  0 0  N
-upstream  PHY_EDGE_CORE_ROW_0_1_Left TAPCELL_X1  0 0  FS
+reference PHY_EDGE_CORE_ROW_0_1_Left TAPCELL_X1  0 0  FS
 ```
 
 ⟹ Treat combined `tapcell` output as **not correlated at this pin**. `cut_rows` and endcap
 placement are unaffected and remain exact.
 
-Instance *names* match except for the trailing counter: upstream numbers physical cells in the
+Instance *names* match except for the trailing counter: the reference numbers physical cells in the
 order Boost hands back polygon vertices, an arbitrary starting vertex rather than a stated rule.
 
 ## Rip-up
@@ -115,7 +115,7 @@ fault nobody sees until silicon. A position nothing fills stays empty and places
 Taps and endcaps use different default prefixes — `TAP_` and `PHY_` — because they are separate
 namespaces that can be ripped up independently.
 
-Instance *names* match except for the trailing counter: upstream numbers physical cells in the
+Instance *names* match except for the trailing counter: the reference numbers physical cells in the
 order Boost hands back polygon vertices, which is an arbitrary starting vertex rather than a stated
 rule, so reproducing it would mean reverse-engineering a library's internals.
 
@@ -126,11 +126,11 @@ holes, and the census of corner types. Endcap placement is driven entirely by th
 so being able to see it before any cell is placed is what makes it checkable.
 
 The goldens name every corner cell for the corner type that produced it
-(`PHY_CORNER_ROW_0_OuterBottomLeft_0`), so they state upstream's classification outright. Against
+(`PHY_CORNER_ROW_0_OuterBottomLeft_0`), so they state the reference's classification outright. Against
 those: **3 cases match exactly** — including one exercising all seven corner types on a polygon
 boundary with notches, and one where five macros produce exactly five of each inner corner type.
 
-Five more are **unresolved, not failing**: the golden counts corner cells *placed*, and upstream
+Five more are **unresolved, not failing**: the golden counts corner cells *placed*, and the reference
 places one only where a row actually reaches the corner. Having more corners than the golden has
 cells is expected there. No case is missing a corner the golden placed — which is the direction
 that would mean the classification is wrong.

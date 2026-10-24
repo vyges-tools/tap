@@ -1079,7 +1079,33 @@ pub fn place_all(
     masters: &EndcapMasters,
     phy_index: &mut usize,
 ) -> Result<Vec<Placement>, Unfillable> {
+    place_all_counted(classified, rows, masters, phy_index).map(|(out, _)| out)
+}
+
+/// What `place_all` reports: the corner cells that stand at the end, and the edge cells.
+///
+/// Rules (placeEndcaps):
+/// - a ring's corner count is taken after its corners are placed, net of the ones it displaced
+///   (only its own can be), and every ring counts — outer boundary and holes;
+/// - ⚠️ the edge count adds only the OUTER boundaries' edge cells: a hole's edges are filled, and
+///   not counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndcapCounts {
+    pub corners: usize,
+    pub endcaps: usize,
+}
+
+/// `place_all`, with the counts the run reports.
+pub fn place_all_counted(
+    classified: &[crate::boundary::ClassifiedPolygon],
+    rows: &[Row],
+    masters: &EndcapMasters,
+    phy_index: &mut usize,
+) -> Result<(Vec<Placement>, EndcapCounts), Unfillable> {
     let mut out: Vec<Placement> = Vec::new();
+    // Indices in `out` of the corner cells, and the outer boundaries' edge cell count.
+    let mut corner_cells: Vec<usize> = Vec::new();
+    let mut outer_edge_cells = 0usize;
     let mut filled: Vec<(EdgeType, i32, i32, i32, i32)> = Vec::new();
     // 🔑 **What each row already holds, PERSISTED ACROSS POLYGONS AND HOLES**, and split in two
     // because the halves have different powers. Upstream's `placed_corners_` is cleared once at
@@ -1103,7 +1129,8 @@ pub fn place_all(
                 .chain(poly.holes.iter().map(|(e, c)| (c.as_slice(), e.as_slice())))
                 .collect();
 
-        for (corners, edges) in rings {
+        for (ring_no, (corners, edges)) in rings.into_iter().enumerate() {
+            let outer = ring_no == 0;
             ring_id += 1;
             // Mirrors upstream's `TAP Endcap 2` debug group, so the two edge lists can be diffed
             // directly rather than inferred from the cells they place.
@@ -1122,6 +1149,7 @@ pub fn place_all(
                     };
                     if let Some(p) = place_corner(c, row, masters, phy_index) {
                         let Some(m) = masters.for_corner(c.kind, row.orient == "R0") else {
+                            corner_cells.push(out.len());
                             out.push(p);
                             continue;
                         };
@@ -1148,6 +1176,7 @@ pub fn place_all(
                             out_idx: out.len(),
                             ring: ring_id,
                         });
+                        corner_cells.push(out.len());
                         out.push(p);
                     }
                 }
@@ -1210,6 +1239,9 @@ pub fn place_all(
                                     blocked.push(Rect::new(pl.x, pl.y, pl.x + w, pl.y + h));
                                 }
                             }
+                            if outer {
+                                outer_edge_cells += placed.len();
+                            }
                             out.extend(placed);
                         }
                     }
@@ -1232,6 +1264,9 @@ pub fn place_all(
                                     std::slice::from_ref(&p),
                                     masters,
                                 );
+                                if outer {
+                                    outer_edge_cells += 1;
+                                }
                                 out.push(p);
                             }
                         }
@@ -1242,12 +1277,17 @@ pub fn place_all(
     }
     // ⚠️ **Displaced corners are removed HERE, not in place** — removing mid-run would shift
     // every later index and silently displace the wrong cell.
-    Ok(out
+    let counts = EndcapCounts {
+        corners: corner_cells.iter().filter(|i| !dead.contains(i)).count(),
+        endcaps: outer_edge_cells,
+    };
+    let out = out
         .into_iter()
         .enumerate()
         .filter(|(i, _)| !dead.contains(i))
         .map(|(_, p)| p)
-        .collect())
+        .collect();
+    Ok((out, counts))
 }
 #[cfg(test)]
 mod orchestration_tests {
@@ -1439,6 +1479,39 @@ mod orchestration_tests {
             !inner.is_empty(),
             "the hole's corners were never capped: {out:?}"
         );
+    }
+
+    /// Rules (placeEndcaps): every ring's corners count, the hole's included; only the OUTER
+    /// boundary's edge cells count, so cutting a macro hole out of the same rows leaves the edge
+    /// count where it was though the hole's edges are filled.
+    #[test]
+    fn counts_take_every_corner_and_only_outer_edges() {
+        let rows_with_hole = |hole: bool| -> Vec<Row> {
+            let mut rs = Vec::new();
+            for i in 0..10 {
+                let y0 = i * 10;
+                let spans: &[(i32, i32, &str)] = if hole && (40..60).contains(&y0) { &[(0, 40, "a"), (60, 100, "b")] } else { &[(0, 100, "")] };
+                for &(x0, x1, sfx) in spans {
+                    rs.push(Row { name: format!("ROW_{i}{sfx}"), site: "core".into(), orient: "R0".into(), bbox: Rect::new(x0, y0, x1, y0 + 10), site_width: 10 });
+                }
+            }
+            rs
+        };
+        let run = |hole: bool| {
+            let rs = rows_with_hole(hole);
+            let c = classify(&rs, BRect::new(0, 0, 100, 100));
+            let mut idx = 0;
+            place_all_counted(&c, &rs, &ms(), &mut idx).unwrap()
+        };
+        let (plain, plain_n) = run(false);
+        let (holed, holed_n) = run(true);
+        let corners = |out: &[Placement]| out.iter().filter(|p| p.name.contains("CORNER")).count();
+        assert_eq!(plain_n.corners, corners(&plain));
+        assert_eq!(holed_n.corners, corners(&holed));
+        assert!(holed_n.corners > plain_n.corners, "the hole's corners count");
+        assert_eq!(plain_n.corners + plain_n.endcaps, plain.len());
+        assert_eq!(holed_n.endcaps, plain_n.endcaps, "the hole's edge cells are not counted");
+        assert!(holed.len() > holed_n.corners + holed_n.endcaps, "though they are placed");
     }
 
     #[test]

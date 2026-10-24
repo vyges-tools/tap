@@ -56,6 +56,35 @@ macro_rules! diag {
     ($($t:tt)*) => { diag_line(format!($($t)*)) };
 }
 
+/// Write one run line (`[INFO TAP-nnnn] text`) through the suite logger: on stderr as it is
+/// logged, and an event under its code.
+fn log_line(warning: bool, id: u16, text: String) {
+    use std::sync::{Mutex, OnceLock};
+    static LOG: OnceLock<Mutex<vyges_events::logger::Logger>> = OnceLock::new();
+    let mut log = LOG
+        .get_or_init(|| Mutex::new(vyges_events::logger::Logger::new().events("vyges-tap")))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if warning {
+        log.warn("TAP", id, text);
+    } else {
+        log.info("TAP", id, text);
+    }
+    for l in log.take_lines() {
+        eprintln!("{l}");
+    }
+}
+
+/// `placeEndcaps`'s closing lines: each count only when it is not zero, corners first.
+fn log_endcap_counts(n: endcaps::EndcapCounts) {
+    if n.corners > 0 {
+        log_line(false, 3, format!("Inserted {} endcap corners.", n.corners));
+    }
+    if n.endcaps > 0 {
+        log_line(false, 4, format!("Inserted {} endcaps.", n.endcaps));
+    }
+}
+
 // ⚠️ The prefix here is the CLI GROUP this engine belongs to, and vyges-cli's MODULES
 // registry is what actually decides it (`group: "physical"`). It read `vyges loom tap`
 // for a release after the construction engines were split out of the loom suite, because
@@ -865,6 +894,7 @@ fn place_tapcells(args: &[String]) -> ExitCode {
             &mut idx,
         ));
     }
+    log_line(false, 5, format!("Inserted {} tapcells.", planned.len()));
 
     if !opts.dry_run {
         if let Err(e) = apply(&mut db, &planned) {
@@ -995,8 +1025,11 @@ fn place_endcaps(args: &[String]) -> ExitCode {
     let region = boundary::row_region(core, &rows.iter().map(|r| r.bbox).collect::<Vec<_>>());
     let classified = boundary::classify(&region);
     let mut idx = 0usize;
-    let planned = match endcaps::place_all(&classified, &rows, &masters, &mut idx) {
-        Ok(p) => p,
+    let planned = match endcaps::place_all_counted(&classified, &rows, &masters, &mut idx) {
+        Ok((p, n)) => {
+            log_endcap_counts(n);
+            p
+        }
         Err(u) => {
             diag!("{}", unfillable(&u, dbu));
             return ExitCode::from(2);
@@ -1026,22 +1059,16 @@ fn tapcell(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    for dead in [
-        "endcap-cpp",
-        "tbtie-cpp",
-        "no-cell-at-top-bottom",
-        "disallow-one-site-gaps",
+    // Upstream warns and ignores these; refusing would block a ported script for no gain. In the
+    // order `tapcell` checks them, which is not the order they were added.
+    for (dead, id) in [
+        ("endcap-cpp", 14),
+        ("disallow-one-site-gaps", 17),
+        ("tbtie-cpp", 15),
+        ("no-cell-at-top-bottom", 16),
     ] {
         if opts.get(dead).is_some() || args.iter().any(|a| a == &format!("--{dead}")) {
-            // Upstream warns and ignores these; refusing would block a ported script for no gain.
-            vyges_events::emit(
-                &vyges_events::Event::new(
-                    "vyges-tap",
-                    vyges_events::Severity::Warn,
-                    format!("--{dead} is deprecated and ignored"),
-                )
-                .with_code("TAP-DEPRECATED-OPTION"),
-            );
+            log_line(true, id, format!("{} option is deprecated.", dead.replace('-', "_")));
         }
     }
     let (mut db, dbu) = match open_scaled(&opts.odb) {
@@ -1199,8 +1226,11 @@ fn tapcell(args: &[String]) -> ExitCode {
     let classified = boundary::classify(&region);
     // One counter across both phases: upstream numbers every physical instance in one sequence.
     let mut idx = 0usize;
-    let endcap_cells = match endcaps::place_all(&classified, &rows, &masters, &mut idx) {
-        Ok(p) => p,
+    let endcap_cells = match endcaps::place_all_counted(&classified, &rows, &masters, &mut idx) {
+        Ok((p, n)) => {
+            log_endcap_counts(n);
+            p
+        }
         Err(u) => {
             diag!("{}", unfillable(&u, dbu));
             return ExitCode::from(2);
@@ -1263,6 +1293,7 @@ fn tapcell(args: &[String]) -> ExitCode {
                 &mut idx,
             ));
         }
+        log_line(false, 5, format!("Inserted {} tapcells.", tap_cells.len()));
     }
 
     if !opts.dry_run {

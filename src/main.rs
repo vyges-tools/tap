@@ -1363,7 +1363,7 @@ fn ripup(args: &[String]) -> ExitCode {
     finish(&db, &opts.odb, &opts, taps.len() + endcaps.len(), "removed")
 }
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ⛔ Before any database exists: libodb then logs to the events trail (stderr) only, and
     // stdout carries nothing but the report a caller parses.

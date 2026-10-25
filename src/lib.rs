@@ -18,6 +18,10 @@
 //! function), extracted by reading OpenROAD's `tapcell.cpp` — the reference implementation for
 //! this behaviour. Nothing is copied from it.
 
+// The crate's own name inside it: the command-line entry ([`cli_main`]) is built into the
+// library too, and its `vyges_tap::…` paths resolve here.
+extern crate self as vyges_tap;
+
 /// This crate's version, as Cargo knows it — the single number the whole suite is released on.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -337,3 +341,10 @@ mod ripup_tests {
         assert!(!picked.iter().any(|n| n == "TAPPED_BUT_NOT_OURS"));
     }
 }
+
+/// The `vyges-tap` command-line entry (the binary's `main`), built into the library too so a
+/// suite binary can link every engine and run the one it is invoked as.
+#[cfg(feature = "suite")]
+#[doc(hidden)]
+#[path = "main.rs"]
+pub mod cli_main;

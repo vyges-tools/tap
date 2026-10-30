@@ -714,7 +714,7 @@ fn finish(db: &Db, path: &str, opts: &Opts, planned: usize, what: &str) -> ExitC
                 what
             ),
         )
-        .with_code("TAP-PLACED"),
+        .with_code("TAP-DONE"),
     );
     println!(
         "{{\n  \"tool\": \"vyges-tap\",\n  \"status\": \"{}\",\n  \"{}\": {},\n  \"odb_written\": {}\n}}",

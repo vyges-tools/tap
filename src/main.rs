@@ -199,7 +199,45 @@ const DESCRIBE: &str = r#"{
     "id": "rows-cut",
     "field": "status",
     "pass_when": { "eq": "applied" }
-  }
+  },
+  "tools": [
+    {
+      "name": "tap.tapcell",
+      "summary": "cut the rows, place endcaps at both ends of every row and well taps along it",
+      "invocation": {
+        "args_template": ["tapcell", "{odb}", "--tapcell-master", "{tapcell_master}", "--endcap-master", "{endcap_master}"],
+        "optional": [
+          { "arg": "distance", "flag": "--distance" },
+          { "arg": "halo_width_x", "flag": "--halo-width-x" },
+          { "arg": "halo_width_y", "flag": "--halo-width-y" },
+          { "arg": "row_min_width", "flag": "--row-min-width" },
+          { "arg": "tap_prefix", "flag": "--tap-prefix" },
+          { "arg": "endcap_prefix", "flag": "--endcap-prefix" },
+          { "arg": "out_odb", "flag": "--out-odb" },
+          { "arg": "out_def", "flag": "--out-def" }
+        ],
+        "emits_json": true
+      },
+      "inputs": {
+        "type": "object",
+        "required": ["odb", "tapcell_master", "endcap_master"],
+        "properties": {
+          "odb": { "type": "string", "description": "path to a floorplanned design database (.odb)" },
+          "tapcell_master": { "type": "string", "description": "the well-tap cell master" },
+          "endcap_master": { "type": "string", "description": "the endcap cell master" },
+          "distance": { "type": "number", "description": "tap spacing along a row, in MICRONS" },
+          "halo_width_x": { "type": "number", "description": "keep-out around a macro, horizontally, in MICRONS" },
+          "halo_width_y": { "type": "number", "description": "keep-out around a macro, vertically, in MICRONS" },
+          "row_min_width": { "type": "number", "description": "do not leave a row narrower than this, in MICRONS" },
+          "tap_prefix": { "type": "string", "description": "instance-name prefix for taps (default TAP_)" },
+          "endcap_prefix": { "type": "string", "description": "instance-name prefix for endcaps (default PHY_)" },
+          "out_odb": { "type": "string", "description": "write the database here instead of in place" },
+          "out_def": { "type": "string", "description": "also write the result as DEF" }
+        }
+      },
+      "assertion": { "id": "cells-placed", "field": "status", "pass_when": { "eq": "applied" } }
+    }
+  ]
 }
 "#;
 
@@ -1547,6 +1585,44 @@ mod pin_tests {
                 !t.contains(&format!("previous pin {PIN_TOKEN}")),
                 "a previous pin must be spelled out, not {PIN_TOKEN}: {t}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod descriptor_args_tests {
+    use super::DESCRIBE;
+    /// Every advertised input reaches the command line, and every command-line token is
+    /// advertised -- for the main operation and each `tools[]` entry. `vyges mcp` builds the
+    /// argv from these and refuses an argument the template would drop; 0.1.51 shipped inputs
+    /// that never arrived (ifp's die area, ppl's layers, fin's rules).
+    #[test]
+    fn every_advertised_input_reaches_the_command_line() {
+        use std::collections::BTreeSet;
+        let d: serde_json::Value = serde_json::from_str(DESCRIBE).expect("descriptor is valid JSON");
+        let mut ops = vec![d.clone()];
+        ops.extend(d["tools"].as_array().cloned().unwrap_or_default());
+        for op in &ops {
+            let inv = &op["invocation"];
+            let mut used: BTreeSet<String> = inv["args_template"]
+                .as_array()
+                .expect("an args_template")
+                .iter()
+                .filter_map(|t| t.as_str())
+                .filter(|t| t.starts_with('{') && t.ends_with('}'))
+                .map(|t| t[1..t.len() - 1].to_string())
+                .collect();
+            if let Some(o) = inv.get("optional") {
+                let o = o.as_array().expect("invocation.optional is an array of {arg, flag}");
+                used.extend(o.iter().map(|x| x["arg"].as_str().expect("an arg").to_string()));
+            }
+            let props: BTreeSet<String> = op["inputs"]["properties"]
+                .as_object()
+                .expect("inputs.properties")
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(used, props, "{}: command line vs advertised inputs", op["name"]);
         }
     }
 }

@@ -1,7 +1,5 @@
 # vyges-tap
 
-**[Download Loom](https://vyges.com/products/vyges-cli/#install)** · install the free [Vyges CLI](https://vyges.com/products/vyges-cli/), then `vyges install physical`
-
 Row cutting and physical-cell insertion over the OpenDB design database.
 
 All five commands are implemented and checked against the reference goldens: `cut-rows`,
